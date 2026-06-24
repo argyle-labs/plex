@@ -1,0 +1,27 @@
+# Proxmox LXC config for Plex — /etc/pve/lxc/<vmid>.conf
+# GPU device GIDs must match `stat -c '%g' /dev/dri/renderD128` on the PVE host.
+#
+arch: amd64
+cores: 4
+memory: 4096
+hostname: plex
+ostype: debian
+rootfs: local-lvm:vm-<vmid>-disk-0,size=32G
+net0: name=eth0,bridge=vmbr0,ip=dhcp,firewall=1
+swap: 0
+
+# GPU passthrough
+dev0: /dev/dri/renderD128,gid=44
+dev1: /dev/dri/card0,gid=44
+
+# Required for nested functionality and GPU access
+features: nesting=1
+lxc.apparmor.profile: unconfined
+lxc.seccomp.profile:
+
+# Shared memory for transcode buffers (4GB minimum recommended)
+lxc.mount.entry: tmpfs dev/shm tmpfs nodev,nosuid,size=4g,mode=1777,create=dir 0 0
+
+# Mount points — adjust paths to your storage
+mp0: /mnt/<pool>/data,mp=/mnt/media,ro=1
+mp1: /opt/plex/config,mp=/var/lib/plexmediaserver

@@ -108,19 +108,63 @@ sudo systemctl restart docker
 
 Then use `examples/docker-compose.nvidia.yml`.
 
-## Proxmox LXC
+## Proxmox LXC (native, no Docker)
 
-For Docker inside a Proxmox LXC, add to `/etc/pve/lxc/<vmid>.conf`:
+The preferred way to run Plex on Proxmox is a plain Debian 12 LXC with Plex installed directly — no Docker layer.
+
+### Automated provisioning
+
+Run on the Proxmox host as root:
+
+```sh
+git clone https://github.com/argyle-labs/plex
+cd plex
+
+# Basic — DHCP, media at /mnt/<pool>/data
+bash lxc/provision.sh 116 \
+  --hostname plex \
+  --storage local-lvm \
+  --memory 4096 \
+  --cores 4 \
+  --media /mnt/<pool>/data \
+  --config /opt/plex/config
+
+# Pinned Plex version + static IP
+bash lxc/provision.sh 116 \
+  --hostname plex \
+  --ip <ip>/24 \
+  --gw <ip> \
+  --media /mnt/<pool>/data \
+  --plex-version 1.41.2.9200-c6bbc1b53
+```
+
+The script creates the LXC, configures GPU passthrough, installs Plex, auto-detects the GPU driver, and starts the service. Plex is reachable at `:32400/web` when done.
+
+### Manual LXC config
+
+See [`lxc/plex.conf.example`](lxc/plex.conf.example) for a full annotated config. Key entries for GPU passthrough:
 
 ```
 features: nesting=1
 lxc.apparmor.profile: unconfined
 lxc.seccomp.profile:
+lxc.mount.entry: tmpfs dev/shm tmpfs nodev,nosuid,size=4g,mode=1777,create=dir 0 0
 dev0: /dev/dri/renderD128,gid=44
 dev1: /dev/dri/card0,gid=44
 ```
 
-`lxc.seccomp.profile:` with no value disables the default seccomp filter, which is required for nested Docker. `gid=44` matches the `video` group on most Debian/Ubuntu hosts — verify with `stat -c '%g' /dev/dri/renderD128` on the Proxmox host.
+Check the GID: `stat -c '%g' /dev/dri/renderD128` on the Proxmox host.
+
+After creating the LXC, install Plex:
+
+```sh
+# On the Proxmox host
+pct push <vmid> scripts/install.sh /tmp/install.sh --perms 0755
+pct exec <vmid> -- bash /tmp/install.sh
+
+pct push <vmid> scripts/configure.sh /tmp/configure.sh --perms 0755
+pct exec <vmid> -- bash /tmp/configure.sh
+```
 
 ## Enabling Hardware Transcoding in Plex
 
