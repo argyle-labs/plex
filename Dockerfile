@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
 RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
       /etc/apt/sources.list.d/debian.sources
 
-# System deps + Intel VAAPI drivers (both generations) + OpenCL
+# System deps + GPU drivers (architecture-aware)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
@@ -27,21 +27,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       udev \
       xmlstarlet \
       uuid-runtime \
-      # Intel VA-API: Gen8+ (Broadwell → Arrow Lake) — iHD driver, non-free
-      intel-media-va-driver-non-free \
-      # Intel VA-API: Gen4–9 (HD Graphics 2000–6000) — open source i965 driver
-      i965-va-driver \
-      # OpenCL — required for HDR→SDR tone mapping via tonemap_vaapi
-      intel-opencl-icd \
       ocl-icd-libopencl1 \
-      # AMD VA-API: GCN+ (RX 400 series and newer) via Mesa radeonsi driver
       mesa-va-drivers \
-      # Privilege drop helper
       gosu \
-      # Diagnostics (small, useful for debugging)
       vainfo \
     && apt-get clean \
     && find /var/lib/apt/lists -type f -delete
+
+# Intel drivers are x86-only (iHD Gen8+, i965 Gen4-9, OpenCL for tone mapping)
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "amd64" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        intel-media-va-driver-non-free \
+        i965-va-driver \
+        intel-opencl-icd \
+      && apt-get clean \
+      && find /var/lib/apt/lists -type f -delete; \
+    fi
 
 # Install Plex — pinned version via direct .deb, or latest via apt
 RUN ARCH=$(dpkg --print-architecture) && \
