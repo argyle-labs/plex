@@ -241,6 +241,55 @@ Hardware transcoding requires an active [Plex Pass](https://www.plex.tv/plex-pas
 
 ---
 
+## Backup & Restore
+
+`backup.sh` stops Plex, archives config, then restarts. Minimal is the default — complete is opt-in.
+
+| Mode | What's included | What's excluded |
+|---|---|---|
+| **Minimal** (default) | `Preferences.xml`, `Plug-in Support/Databases`, `Plug-in Support/Preferences`, `Plug-in Support/Data` | Cache, Codecs, Logs, Metadata, Media, Scanners |
+| **Complete** (`--complete`) | All of minimal + `Metadata`, `Media`, `Scanners`, `Plug-ins` | Cache, Codecs, Logs, Crash Reports, Updates, Drivers |
+
+Cache and Codecs are always excluded — Plex regenerates them automatically.
+
+### LXC
+
+```sh
+# Minimal backup (default) — writes to /mnt/backups if mounted, otherwise ./
+pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/backup.sh)
+
+# Complete backup
+pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/backup.sh) --complete
+
+# Restore
+pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/restore.sh) /mnt/backups/plex-backup-minimal-20260101-120000.tar.gz
+```
+
+### Docker
+
+```sh
+# Minimal backup
+docker exec plex bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/backup.sh)
+
+# Complete backup
+docker exec plex bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/backup.sh) --complete --output /mnt/backups
+
+# Restore
+docker exec plex bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/restore.sh) /mnt/backups/plex-backup-minimal-20260101-120000.tar.gz --force
+```
+
+### From the host (volume path)
+
+```sh
+# If you have the backup script locally
+bash scripts/backup.sh --output /mnt/backups
+bash scripts/restore.sh /mnt/backups/plex-backup-minimal-20260101-120000.tar.gz
+```
+
+Backup output: `plex-backup-minimal-YYYYMMDD-HHMMSS.tar.gz` or `plex-backup-complete-YYYYMMDD-HHMMSS.tar.gz`.
+
+---
+
 ## Tags
 
 Images are synced daily to Plex upstream versions. The last 5 versions are kept.
