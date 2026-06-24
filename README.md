@@ -243,19 +243,19 @@ Hardware transcoding requires an active [Plex Pass](https://www.plex.tv/plex-pas
 
 ## Backup & Restore
 
-`backup.sh` stops Plex, archives config, then restarts. Minimal is the default — complete is opt-in.
+`backup.sh` stops Plex, archives config, then restarts. Minimal is the default — complete is opt-in. Supports tar.gz (default) or Proxmox Backup Server (`--pbs`).
 
 | Mode | What's included | What's excluded |
 |---|---|---|
 | **Minimal** (default) | `Preferences.xml`, `Plug-in Support/Databases`, `Plug-in Support/Preferences`, `Plug-in Support/Data` | Cache, Codecs, Logs, Metadata, Media, Scanners |
 | **Complete** (`--complete`) | All of minimal + `Metadata`, `Media`, `Scanners`, `Plug-ins` | Cache, Codecs, Logs, Crash Reports, Updates, Drivers |
 
-Cache and Codecs are always excluded — Plex regenerates them automatically.
+Cache and Codecs are always excluded — Plex regenerates them on start.
 
-### LXC
+### LXC (tar.gz)
 
 ```sh
-# Minimal backup (default) — writes to /mnt/backups if mounted, otherwise ./
+# Minimal backup — writes to /mnt/backups if mounted, otherwise ./
 pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/backup.sh)
 
 # Complete backup
@@ -265,7 +265,7 @@ pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey
 pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/restore.sh) /mnt/backups/plex-backup-minimal-20260101-120000.tar.gz
 ```
 
-### Docker
+### Docker (tar.gz)
 
 ```sh
 # Minimal backup
@@ -278,15 +278,47 @@ docker exec plex bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/p
 docker exec plex bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/restore.sh) /mnt/backups/plex-backup-minimal-20260101-120000.tar.gz --force
 ```
 
-### From the host (volume path)
+Backup output filename: `plex-backup-minimal-YYYYMMDD-HHMMSS.tar.gz` or `plex-backup-complete-YYYYMMDD-HHMMSS.tar.gz`.
 
+### PBS (Proxmox Backup Server)
+
+File-level PBS backups use `proxmox-backup-client` and land in PBS as `host/plex` — browseable in the PBS web UI and subject to PBS deduplication and encryption.
+
+**Required env vars:**
 ```sh
-# If you have the backup script locally
-bash scripts/backup.sh --output /mnt/backups
-bash scripts/restore.sh /mnt/backups/plex-backup-minimal-20260101-120000.tar.gz
+export PBS_REPOSITORY="backup@pbs@<pbs-host>:<datastore>"
+export PBS_FINGERPRINT="<server-fingerprint>"   # from PBS dashboard → Datastore → Show Fingerprint
+export PBS_PASSWORD="<password-or-token>"
 ```
 
-Backup output: `plex-backup-minimal-YYYYMMDD-HHMMSS.tar.gz` or `plex-backup-complete-YYYYMMDD-HHMMSS.tar.gz`.
+```sh
+# Minimal backup to PBS (inside LXC)
+pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/backup.sh) --pbs
+
+# Complete backup to PBS
+pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/backup.sh) --pbs --complete
+
+# Custom retention (defaults: keep-daily=7 keep-weekly=4 keep-monthly=2)
+pct exec <vmid> -- bash <(curl -fsSL .../backup.sh) --pbs --keep-daily 14 --keep-weekly 8
+
+# Prune only (no new backup)
+pct exec <vmid> -- bash <(curl -fsSL .../backup.sh) --pbs-prune-only
+
+# List available PBS snapshots
+pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/restore.sh) --pbs
+
+# Restore latest PBS snapshot
+pct exec <vmid> -- bash <(curl -fsSL .../restore.sh) --pbs --force
+
+# Restore specific PBS snapshot
+pct exec <vmid> -- bash <(curl -fsSL .../restore.sh) --pbs --snapshot 2026-06-24T04:00:00Z
+```
+
+**Full LXC snapshots** (entire container rootfs) use PVE's built-in backup — set up in the PVE web UI under Datacenter → Backup, or run manually:
+```sh
+vzdump <vmid> --storage pbs --mode snapshot --compress zstd
+```
+This is separate from the file-level `backup.sh` — use both for full coverage.
 
 ---
 
