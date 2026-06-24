@@ -68,30 +68,28 @@ REPO_RAW="https://raw.githubusercontent.com/argyle-labs/plex/${BRANCH}"
 # ── Template ──────────────────────────────────────────────────────────────────
 TEMPLATE_STORE="local"
 
-# Find the newest available Debian 12 standard template
-TEMPLATE=$(pveam available --section system 2>/dev/null \
-    | awk '{print $2}' \
+# Find the newest Debian 12 standard template — prefer already-downloaded
+TEMPLATE=$(pveam list "$TEMPLATE_STORE" 2>/dev/null \
+    | awk '{print $1}' \
+    | sed 's|.*vztmpl/||' \
     | grep '^debian-12-standard' \
     | sort -V | tail -1)
 
 if [[ -z "$TEMPLATE" ]]; then
-    echo "[provision] Updating template list..."
+    echo "[provision] No local Debian 12 template found, downloading..."
     pveam update
     TEMPLATE=$(pveam available --section system 2>/dev/null \
         | awk '{print $2}' \
         | grep '^debian-12-standard' \
         | sort -V | tail -1)
-fi
-
-if [[ -z "$TEMPLATE" ]]; then
-    echo "[provision] ERROR: No debian-12-standard template found." >&2
-    exit 1
-fi
-
-if ! pveam list "$TEMPLATE_STORE" 2>/dev/null | grep -q "$TEMPLATE"; then
-    echo "[provision] Downloading ${TEMPLATE}..."
+    if [[ -z "$TEMPLATE" ]]; then
+        echo "[provision] ERROR: No debian-12-standard template available." >&2
+        exit 1
+    fi
     pveam download "$TEMPLATE_STORE" "$TEMPLATE"
 fi
+
+echo "[provision] Using template: ${TEMPLATE}"
 
 # ── Network ───────────────────────────────────────────────────────────────────
 NET_ARGS="name=eth0,bridge=${BRIDGE},firewall=1"
