@@ -1,0 +1,160 @@
+name: Sync Plex Versions
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # daily at 4 AM UTC
+  workflow_dispatch:
+    inputs:
+      keep_versions:
+        description: 'Number of Plex versions to keep'
+        default: '5'
+        required: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  KEEP_VERSIONS: ${{ github.event.inputs.keep_versions || '5' }}
+
+jobs:
+  discover:
+    name: Discover Plex versions
+    runs-on: ubuntu-latest
+    outputs:
+      to_build: ${{ steps.plan.outputs.to_build }}
+      to_delete: ${{ steps.plan.outputs.to_delete }}
+      latest: ${{ steps.plan.outputs.latest }}
+    steps:
+      - name: Fetch upstream Plex versions
+        id: upstream
+        run: |
+          # Plex public download API — returns latest N versions per platform
+          PLEX_JSON=$(curl -fsSL 'https://plex.tv/api/downloads/5.json')
+
+          # Extract Linux x86_64 versions in order (newest first)
+          VERSIONS=$(echo "$PLEX_JSON" \
+            | jq -r '[.computer.Linux.releases[] | select(.build == "linux-x86_64")] | .[0:$n | tonumber] | .[].version' \
+              --argjson n "$KEEP_VERSIONS" 2>/dev/null \
+            || echo "$PLEX_JSON" \
+              | jq -r '.computer.Linux.releases[] | select(.build == "linux-x86_64") | .version' \
+              | head -"$KEEP_VERSIONS")
+
+          echo "upstream_versions<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$VERSIONS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch existing GHCR versions
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh api \
+            "users/${{ github.repository_owner }}/packages/container/plex/versions" \
+            --paginate \
+            --jq '.[].metadata.container.tags[]' 2>/dev/null \
+            | grep -v '^latest$' \
+            | sort -t. -k1,1n -k2,2n -k3,3n || true)
+
+          echo "existing_versions<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$EXISTING" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Plan builds and deletions
+        id: plan
+        run: |
+          UPSTREAM="${{ steps.upstream.outputs.upstream_versions }}"
+          EXISTING="${{ steps.existing.outputs.existing_versions }}"
+
+          # Versions we need to build (in upstream but not in GHCR)
+          TO_BUILD=$(comm -23 \
+            <(echo "$UPSTREAM" | sort) \
+            <(echo "$EXISTING" | sort))
+
+          # Versions to delete (in GHCR but not in upstream keep list)
+          TO_DELETE=$(comm -13 \
+            <(echo "$UPSTREAM" | sort) \
+            <(echo "$EXISTING" | sort))
+
+          LATEST=$(echo "$UPSTREAM" | head -1)
+
+          echo "Latest Plex: $LATEST"
+          echo "To build:"; echo "$TO_BUILD"
+          echo "To delete:"; echo "$TO_DELETE"
+
+          # Output as JSON arrays for matrix
+          TO_BUILD_JSON=$(echo "$TO_BUILD" | grep -v '^$' | jq -R . | jq -sc . || echo '[]')
+          TO_DELETE_JSON=$(echo "$TO_DELETE" | grep -v '^$' | jq -R . | jq -sc . || echo '[]')
+
+          echo "to_build=$TO_BUILD_JSON" >> "$GITHUB_OUTPUT"
+          echo "to_delete=$TO_DELETE_JSON" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.version }}
+    needs: discover
+    if: needs.discover.outputs.to_build != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.discover.outputs.to_build) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.version }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          build-args: |
+            PLEX_VERSION=${{ matrix.version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}
+            ${{ matrix.version == needs.discover.outputs.latest && format('{0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  prune:
+    name: Prune old versions
+    needs: [discover, build]
+    if: always() && needs.discover.outputs.to_delete != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Delete old GHCR package versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TO_DELETE: ${{ needs.discover.outputs.to_delete }}
+        run: |
+          for version in $(echo "$TO_DELETE" | jq -r '.[]'); do
+            echo "Deleting version: $version"
+            VERSION_ID=$(gh api \
+              "users/${{ github.repository_owner }}/packages/container/plex/versions" \
+              --paginate \
+              --jq ".[] | select(.metadata.container.tags[] == \"$version\") | .id" 2>/dev/null || true)
+
+            if [[ -n "$VERSION_ID" ]]; then
+              gh api --method DELETE \
+                "users/${{ github.repository_owner }}/packages/container/plex/versions/$VERSION_ID"
+              echo "Deleted version ID $VERSION_ID ($version)"
+            else
+              echo "Version $version not found in GHCR, skipping"
+            fi
+          done
