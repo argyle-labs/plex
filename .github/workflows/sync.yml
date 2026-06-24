@@ -30,13 +30,10 @@ jobs:
           # Plex public download API — returns latest N versions per platform
           PLEX_JSON=$(curl -fsSL 'https://plex.tv/api/downloads/5.json')
 
-          # Extract Linux x86_64 versions in order (newest first)
+          # Extract Linux x86_64 versions in order (newest first), slice to keep count
           VERSIONS=$(echo "$PLEX_JSON" \
-            | jq -r '[.computer.Linux.releases[] | select(.build == "linux-x86_64")] | .[0:$n | tonumber] | .[].version' \
-              --argjson n "$KEEP_VERSIONS" 2>/dev/null \
-            || echo "$PLEX_JSON" \
-              | jq -r '.computer.Linux.releases[] | select(.build == "linux-x86_64") | .version' \
-              | head -"$KEEP_VERSIONS")
+            | jq -r --argjson n "$KEEP_VERSIONS" \
+              '[.computer.Linux.releases[] | select(.build == "linux-x86_64")] | .[0:($n | tonumber)] | .[].version')
 
           echo "upstream_versions<<EOF" >> "$GITHUB_OUTPUT"
           echo "$VERSIONS" >> "$GITHUB_OUTPUT"
@@ -52,7 +49,7 @@ jobs:
             --paginate \
             --jq '.[].metadata.container.tags[]' 2>/dev/null \
             | grep -v '^latest$' \
-            | sort -t. -k1,1n -k2,2n -k3,3n || true)
+            | sort -V || true)
 
           echo "existing_versions<<EOF" >> "$GITHUB_OUTPUT"
           echo "$EXISTING" >> "$GITHUB_OUTPUT"
@@ -66,13 +63,13 @@ jobs:
 
           # Versions we need to build (in upstream but not in GHCR)
           TO_BUILD=$(comm -23 \
-            <(echo "$UPSTREAM" | sort) \
-            <(echo "$EXISTING" | sort))
+            <(echo "$UPSTREAM" | sort -V) \
+            <(echo "$EXISTING" | sort -V))
 
           # Versions to delete (in GHCR but not in upstream keep list)
           TO_DELETE=$(comm -13 \
-            <(echo "$UPSTREAM" | sort) \
-            <(echo "$EXISTING" | sort))
+            <(echo "$UPSTREAM" | sort -V) \
+            <(echo "$EXISTING" | sort -V))
 
           LATEST=$(echo "$UPSTREAM" | head -1)
 
@@ -116,6 +113,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute tags
+        id: tags
+        run: |
+          TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}"
+          if [ "${{ matrix.version }}" = "${{ needs.discover.outputs.latest }}" ]; then
+            TAGS="$TAGS,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
       - name: Build and push ${{ matrix.version }}
         uses: docker/build-push-action@v5
         with:
@@ -123,9 +129,7 @@ jobs:
           push: true
           build-args: |
             PLEX_VERSION=${{ matrix.version }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}
-            ${{ matrix.version == needs.discover.outputs.latest && format('{0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64

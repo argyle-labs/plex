@@ -1,7 +1,6 @@
 FROM debian:12-slim
 
 ARG PLEX_VERSION=latest
-ARG TARGETARCH=amd64
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PLEX_MEDIA_SERVER_HOME=/usr/lib/plexmediaserver \
@@ -58,7 +57,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
       curl -fsSL \
         "https://downloads.plex.tv/plex-media-server-new/${PLEX_VERSION}/debian/plexmediaserver_${PLEX_VERSION}_${ARCH}.deb" \
         -o /tmp/plex.deb && \
-      dpkg -i /tmp/plex.deb && \
+      dpkg -i /tmp/plex.deb || apt-get install -y -f && \
       rm /tmp/plex.deb; \
     fi \
     && apt-get clean \

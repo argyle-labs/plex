@@ -4,6 +4,15 @@ set -euo pipefail
 PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR="${CONFIG_DIR:-/config/Library/Application Support}"
 PREFERENCES_PATH="${PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR}/Plex Media Server/Preferences.xml"
 
+# Resolve VAAPI driver path for this architecture — must happen before detect_gpu
+ARCH=$(uname -m)
+case "$ARCH" in
+    aarch64) LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/aarch64-linux-gnu/dri}" ;;
+    armv7l)  LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/arm-linux-gnueabihf/dri}" ;;
+    *)       LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/x86_64-linux-gnu/dri}" ;;
+esac
+export LIBVA_DRIVERS_PATH
+
 # Ensure plex user/group match requested uid/gid
 if ! getent group plex > /dev/null 2>&1; then
     groupadd -g "${PLEX_GID}" plex
@@ -15,14 +24,16 @@ else
 fi
 
 # Add plex user to whatever groups own the GPU devices
+shopt -s nullglob
 for dev in /dev/dri/renderD128 /dev/dri/card0 /dev/nvidia*; do
     [[ -e "$dev" ]] || continue
     dev_gid=$(stat -c '%g' "$dev")
     if ! getent group "$dev_gid" > /dev/null 2>&1; then
         groupadd -g "$dev_gid" "gpu-${dev_gid}"
     fi
-    usermod -aG "$dev_gid" plex 2>/dev/null || true
+    usermod -aG "gpu-${dev_gid}" plex 2>/dev/null || true
 done
+shopt -u nullglob
 
 # Auto-detect GPU and configure hardware transcoding
 detect_gpu() {
@@ -68,26 +79,20 @@ fi
 mkdir -p \
     "${PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR}/Plex Media Server" \
     "${TRANSCODE_DIR:-/transcode}"
-chown -R plex:plex /config "${TRANSCODE_DIR:-/transcode}"
+
+# Only chown top-level entries to avoid scanning a large library on every start
+chown plex:plex /config "${TRANSCODE_DIR:-/transcode}"
+chown plex:plex "${PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR}/Plex Media Server"
 
 # Write initial preferences if claim token provided and prefs don't exist yet
 if [[ -n "${PLEX_CLAIM:-}" ]] && [[ ! -f "${PREFERENCES_PATH}" ]]; then
     mkdir -p "$(dirname "${PREFERENCES_PATH}")"
     cat > "${PREFERENCES_PATH}" << XML
 <?xml version="1.0" encoding="utf-8"?>
-<Preferences PlexOnlineToken="${PLEX_CLAIM}" HardwareAcceleratedEncoders="1" HardwareAcceleratedCodecs="1" TranscoderToneMapping="1" TranscoderToneMappingAgorithm="mobius" />
+<Preferences PlexOnlineToken="${PLEX_CLAIM}" HardwareAcceleratedEncoders="1" HardwareAcceleratedCodecs="1" TranscoderToneMapping="1" TranscoderToneMappingAlgorithm="mobius" />
 XML
     chown plex:plex "${PREFERENCES_PATH}"
 fi
-
-# Resolve VAAPI driver path for this architecture
-ARCH=$(uname -m)
-case "$ARCH" in
-    aarch64) LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/aarch64-linux-gnu/dri}" ;;
-    armv7l)  LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/arm-linux-gnueabihf/dri}" ;;
-    *)       LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/x86_64-linux-gnu/dri}" ;;
-esac
-export LIBVA_DRIVERS_PATH
 
 exec gosu plex env \
     LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH}" \
