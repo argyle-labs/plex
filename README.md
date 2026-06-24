@@ -56,16 +56,12 @@ The preferred deployment on Proxmox: plain Debian 12 LXC with Plex installed dir
 
 ### Automated provisioning
 
-Clone the repo on the Proxmox host and run as root:
+Run on the Proxmox host as root — no git clone needed:
 
 ```sh
-git clone https://github.com/scottdkey/plex
-cd plex
-
-# Minimal — software transcode, DHCP, 2 cores / 2 GB RAM
-bash lxc/provision.sh 116 \
+# Minimal — software transcode only, 2 cores / 2 GB RAM
+bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/lxc/provision.sh) 116 \
   --hostname plex \
-  --storage local-lvm \
   --disk 16G \
   --memory 2048 \
   --cores 2 \
@@ -73,19 +69,17 @@ bash lxc/provision.sh 116 \
   --config /opt/plex/config \
   --media /mnt/pool/data
 
-# Recommended — Intel/AMD GPU, DHCP, 4 cores / 4 GB RAM
-bash lxc/provision.sh 116 \
+# Recommended — Intel/AMD GPU, hardware transcode + HDR tone mapping
+bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/lxc/provision.sh) 116 \
   --hostname plex \
-  --storage local-lvm \
   --memory 4096 \
   --cores 4 \
   --config /opt/plex/config \
   --media /mnt/pool/data
 
 # Recommended — static IP
-bash lxc/provision.sh 116 \
+bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/lxc/provision.sh) 116 \
   --hostname plex \
-  --storage local-lvm \
   --memory 4096 \
   --cores 4 \
   --ip 192.168.1.50/24 \
@@ -94,28 +88,25 @@ bash lxc/provision.sh 116 \
   --media /mnt/pool/data
 
 # Pinned Plex version
-bash lxc/provision.sh 116 \
+bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/lxc/provision.sh) 116 \
   --hostname plex \
   --plex-version 1.41.2.9200-c6bbc1b53 \
   --config /opt/plex/config \
   --media /mnt/pool/data
 ```
 
-GPU device GIDs are auto-detected from the host. Pass `--render-gid` / `--card-gid` to override, or `--no-gpu` to skip passthrough entirely.
+The script resolves the latest Debian 12 template, creates the LXC, configures GPU passthrough, starts it, downloads and runs `install.sh` + `configure.sh` from this repo, and prints the Plex URL. No local files required.
 
-The script: resolves the latest Debian 12 template, creates the LXC, adds GPU passthrough, starts it, runs `install.sh` + `configure.sh`, and prints the Plex URL when done.
+GPU device GIDs default to 44 (standard on Debian/Ubuntu Proxmox hosts). Override with `--render-gid` / `--card-gid` if needed, or skip with `--no-gpu`.
 
 ### Manual install
 
-Create and start a Debian 12 LXC using `lxc/plex.conf.example` as a reference, then on the Proxmox host:
+Create and start a Debian 12 LXC using `lxc/plex.conf.example` as a reference, then inside the LXC:
 
 ```sh
-# Copy scripts into the container and run them
-pct push <vmid> scripts/install.sh /tmp/install.sh --mode 0755
-pct exec <vmid> -- bash /tmp/install.sh
-
-pct push <vmid> scripts/configure.sh /tmp/configure.sh --mode 0755
-pct exec <vmid> -- bash /tmp/configure.sh
+# Run directly from the public repo — no git clone needed
+curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/scottdkey/plex/main/scripts/configure.sh | bash
 ```
 
 ### LXC config reference
