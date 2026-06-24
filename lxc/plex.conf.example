@@ -14,7 +14,6 @@
 # ostype: debian
 # rootfs: local-lvm:vm-<vmid>-disk-0,size=16G
 # net0: name=eth0,bridge=vmbr0,ip=dhcp,firewall=1
-# features: nesting=1
 # lxc.apparmor.profile: unconfined
 # lxc.seccomp.profile:
 # lxc.mount.entry: tmpfs dev/shm tmpfs nodev,nosuid,size=2g,mode=1777,create=dir 0 0
@@ -32,8 +31,8 @@ ostype: debian
 rootfs: local-lvm:vm-<vmid>-disk-0,size=32G
 net0: name=eth0,bridge=vmbr0,ip=dhcp,firewall=1
 
-# Required for GPU device access and apparmor bypass
-features: nesting=1
+# AppArmor unconfined required for GPU device access.
+# Note: nesting is not needed for native Plex installs (no Docker).
 lxc.apparmor.profile: unconfined
 lxc.seccomp.profile:
 

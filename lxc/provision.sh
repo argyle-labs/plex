@@ -112,7 +112,6 @@ pct create "$VMID" "${TEMPLATE_STORE}:vztmpl/${TEMPLATE}" \
     --net0 "$NET_ARGS" \
     --ostype debian \
     --unprivileged 0 \
-    --features nesting=1 \
     --start 0
 
 # ── LXC config extras ─────────────────────────────────────────────────────────
