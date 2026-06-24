@@ -43,14 +43,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && find /var/lib/apt/lists -type f -delete
 
-# Add Plex repo and install
-RUN curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key \
-      | gpg --dearmor -o /usr/share/keyrings/plex-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/plex-archive-keyring.gpg] \
-      https://downloads.plex.tv/repo/deb public main" \
-      > /etc/apt/sources.list.d/plexmediaserver.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends plexmediaserver \
+# Install Plex — pinned version via direct .deb, or latest via apt
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "${PLEX_VERSION}" = "latest" ]; then \
+      curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key \
+        | gpg --dearmor -o /usr/share/keyrings/plex-archive-keyring.gpg && \
+      echo "deb [signed-by=/usr/share/keyrings/plex-archive-keyring.gpg] https://downloads.plex.tv/repo/deb public main" \
+        > /etc/apt/sources.list.d/plexmediaserver.list && \
+      apt-get update && \
+      apt-get install -y --no-install-recommends plexmediaserver; \
+    else \
+      curl -fsSL \
+        "https://downloads.plex.tv/plex-media-server-new/${PLEX_VERSION}/debian/plexmediaserver_${PLEX_VERSION}_${ARCH}.deb" \
+        -o /tmp/plex.deb && \
+      dpkg -i /tmp/plex.deb && \
+      rm /tmp/plex.deb; \
+    fi \
     && apt-get clean \
     && find /var/lib/apt/lists -type f -delete
 

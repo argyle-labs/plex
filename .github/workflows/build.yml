@@ -1,11 +1,20 @@
 name: Build and Push
 
+# Builds the image with latest Plex whenever the Dockerfile or scripts change.
+# For versioned Plex releases, see sync.yml (runs daily).
+
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    paths:
+      - Dockerfile
+      - scripts/**
+      - .github/workflows/build.yml
   pull_request:
     branches: [main]
+    paths:
+      - Dockerfile
+      - scripts/**
 
 env:
   REGISTRY: ghcr.io
@@ -35,24 +44,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push
+      - name: Build and push latest
         uses: docker/build-push-action@v5
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          build-args: PLEX_VERSION=latest
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
