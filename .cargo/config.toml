@@ -1,0 +1,17 @@
+# Development override: resolve the orca git deps to the local in-tree crates
+# so this repo builds against an unreleased plugin-toolkit alongside a checked
+# out orca repo at ../orca. Without this patch, `plugin-toolkit` /
+# `plugin-toolkit-build` resolve from the pinned git tag in Cargo.toml.
+#
+# The slice-1 toolkit surface this plugin depends on resolves from the git tag
+# once a new rc is cut that contains it; until then this patch is what makes a
+# local checkout build. Remove or comment out to build purely against the tag.
+# The orca repo is private. Use the git CLI (which inherits the operator's
+# authenticated gh / ssh credentials) so cargo can resolve the git source that
+# the `[patch]` below redirects to a local path.
+[net]
+git-fetch-with-cli = true
+
+[patch."https://github.com/argyle-labs/orca"]
+plugin-toolkit = { path = "../orca/projects/plugin-toolkit" }
+plugin-toolkit-build = { path = "../orca/projects/plugin-toolkit-build" }

@@ -61,6 +61,12 @@ mkdir -p /etc/systemd/system/plexmediaserver.service.d
     echo "Environment=LIBVA_DRIVERS_PATH=${LIBVA_DRIVERS_PATH}"
     if [[ "$GPU_DRIVER" != "none" ]]; then
         echo "Environment=LIBVA_DRIVER_NAME=${GPU_DRIVER}"
+        # LD_PRELOAD the glibc shim (built by install.sh) so Plex's musl/gcompat
+        # transcoder can load the system VAAPI driver. Without this, hardware
+        # transcoding silently falls back to software. See install.sh build_glibc_shim.
+        if [[ -f /usr/local/lib/plex-glibc-shim.so ]]; then
+            echo "Environment=LD_PRELOAD=/usr/local/lib/plex-glibc-shim.so"
+        fi
     fi
 } > /etc/systemd/system/plexmediaserver.service.d/gpu.conf
 

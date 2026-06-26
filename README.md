@@ -243,7 +243,7 @@ Hardware transcoding requires an active [Plex Pass](https://www.plex.tv/plex-pas
 
 ## Backup & Restore
 
-`backup.sh` stops Plex, archives config, then restarts. Minimal is the default — complete is opt-in. Supports tar.gz (default) or Proxmox Backup Server (`--pbs`).
+`backup` and `restore` are installed at `/usr/local/bin/` by `install.sh` — no GitHub fetch needed.
 
 | Mode | What's included | What's excluded |
 |---|---|---|
@@ -252,47 +252,51 @@ Hardware transcoding requires an active [Plex Pass](https://www.plex.tv/plex-pas
 
 Cache and Codecs are always excluded — Plex regenerates them on start.
 
-### LXC (tar.gz)
+### LXC
 
 ```sh
 # Minimal backup — writes to /mnt/backups if mounted, otherwise ./
-pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh)
+pct exec <vmid> -- backup
 
 # Complete backup
-pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh) --complete
+pct exec <vmid> -- backup --complete
 
-# Restore
-pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/restore.sh) /mnt/backups/plex-backup-minimal-20260101-120000.tar.gz
+# List available backups and restore latest
+pct exec <vmid> -- restore
+
+# List only
+pct exec <vmid> -- restore --list
+
+# Restore specific file
+pct exec <vmid> -- restore /mnt/backups/plex-backup-minimal-20260624-010000.tar.gz
 ```
 
-### Docker (tar.gz)
-
-Three invocation patterns — inside the container, or from the host with `--container`:
+### Docker
 
 ```sh
-# Inside container — minimal backup to /mnt/backups (if mounted) or ./
-docker exec plex bash -c "curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh | bash"
+# Backup inside container
+docker exec plex backup
+docker exec plex backup --complete
 
-# Inside container — complete backup
-docker exec plex bash -c "curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh | bash -s -- --complete"
+# Restore inside container — lists backups, restores latest
+docker exec plex restore
 
-# Host-side — stops container, backs up the /config volume, restarts container
-curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh \
-  | bash -s -- --container plex --output /opt/plex/backups
+# Restore specific backup
+docker exec plex restore /backups/plex-backup-minimal-20260624-010000.tar.gz
 
-# Host-side — restore (stops container, extracts, restarts)
-curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/restore.sh \
-  | bash -s -- /opt/plex/backups/plex-backup-minimal-20260624-010000.tar.gz --container plex
+# Host-side — stops container, backs up /config volume, restarts
+backup --container plex --output /opt/plex/backups
 
-# Inside container — restore
-docker exec plex bash -c "curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/restore.sh | bash -s -- /backups/plex-backup-minimal-20260624-010000.tar.gz --force"
+# Host-side restore
+restore /opt/plex/backups/plex-backup-minimal-20260624-010000.tar.gz --container plex
 ```
 
-Backup output filename: `plex-backup-minimal-YYYYMMDD-HHMMSS.tar.gz` or `plex-backup-complete-YYYYMMDD-HHMMSS.tar.gz`.
+Backup output: `plex-backup-minimal-YYYYMMDD-HHMMSS.tar.gz` or `plex-backup-complete-YYYYMMDD-HHMMSS.tar.gz`.  
+Default backup dir: `/mnt/backups` if mounted, otherwise current directory.
 
 ### PBS (Proxmox Backup Server)
 
-File-level PBS backups use `proxmox-backup-client` and land in PBS as `host/plex` — browseable in the PBS web UI and subject to PBS deduplication and encryption.
+File-level PBS backups use `proxmox-backup-client` and land in PBS as `host/plex` — browseable in the PBS web UI with deduplication and encryption.
 
 **Required env vars:**
 ```sh
@@ -302,33 +306,30 @@ export PBS_PASSWORD="<password-or-token>"
 ```
 
 ```sh
-# Minimal backup to PBS (inside LXC)
-pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh) --pbs
+# Minimal backup to PBS
+pct exec <vmid> -- backup --pbs
 
 # Complete backup to PBS
-pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh) --pbs --complete
+pct exec <vmid> -- backup --pbs --complete
 
 # Custom retention (defaults: keep-daily=7 keep-weekly=4 keep-monthly=2)
-pct exec <vmid> -- bash <(curl -fsSL .../backup.sh) --pbs --keep-daily 14 --keep-weekly 8
+pct exec <vmid> -- backup --pbs --keep-daily 14 --keep-weekly 8
 
 # Prune only (no new backup)
-pct exec <vmid> -- bash <(curl -fsSL .../backup.sh) --pbs-prune-only
+pct exec <vmid> -- backup --pbs-prune-only
 
-# List available PBS snapshots
-pct exec <vmid> -- bash <(curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/restore.sh) --pbs
-
-# Restore latest PBS snapshot
-pct exec <vmid> -- bash <(curl -fsSL .../restore.sh) --pbs --force
+# List available PBS snapshots and restore latest
+pct exec <vmid> -- restore --pbs
 
 # Restore specific PBS snapshot
-pct exec <vmid> -- bash <(curl -fsSL .../restore.sh) --pbs --snapshot 2026-06-24T04:00:00Z
+pct exec <vmid> -- restore --pbs --snapshot 2026-06-24T04:00:00Z
 ```
 
 **Full LXC snapshots** (entire container rootfs) use PVE's built-in backup — set up in the PVE web UI under Datacenter → Backup, or run manually:
 ```sh
 vzdump <vmid> --storage pbs --mode snapshot --compress zstd
 ```
-This is separate from the file-level `backup.sh` — use both for full coverage.
+This is separate from the file-level `backup` command — use both for full coverage.
 
 ---
 

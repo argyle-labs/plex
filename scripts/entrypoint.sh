@@ -94,7 +94,16 @@ XML
     chown plex:plex "${PREFERENCES_PATH}"
 fi
 
+# LD_PRELOAD the glibc shim (built by install.sh) when using a VAAPI driver, so
+# Plex's musl/gcompat transcoder can dlopen the system VAAPI driver. Without it,
+# hardware transcoding silently falls back to software. Not needed for NVIDIA.
+PRELOAD=""
+if [[ -n "${LIBVA_DRIVER_NAME:-}" ]] && [[ -f /usr/local/lib/plex-glibc-shim.so ]]; then
+    PRELOAD="/usr/local/lib/plex-glibc-shim.so"
+fi
+
 exec gosu plex env \
     LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH}" \
     ${LIBVA_DRIVER_NAME:+LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME}"} \
+    ${PRELOAD:+LD_PRELOAD="${PRELOAD}"} \
     /usr/lib/plexmediaserver/Plex\ Media\ Server

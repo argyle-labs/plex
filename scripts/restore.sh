@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
-# Restores Plex Media Server config from a backup created by backup.sh.
-# Supports tar.gz backups (default) and PBS backups (--pbs).
+# Restores Plex Media Server config from a backup created by backup.
+# Installed as /usr/local/bin/restore by install.sh.
 #
-# Usage (tar.gz):
-#   restore.sh <backup-file.tar.gz> [--force]
+# Usage:
+#   restore                        # list backups, restore latest
+#   restore --list                 # list available backups and exit
+#   restore <backup-file.tar.gz>   # restore specific file
+#   restore --pbs                  # list PBS snapshots, restore latest
+#   restore --pbs --snapshot TS    # restore specific PBS snapshot
 #
-# Usage (PBS):
-#   restore.sh --pbs [--snapshot TIMESTAMP] [--force]
+# Options:
+#   --container NAME   Docker container name (host-side invocation)
+#   --force            Skip the 3-second abort window
 #
 # PBS env vars (required for --pbs):
 #   PBS_REPOSITORY   e.g. backup@pbs@<ip>:datastore
 #   PBS_FINGERPRINT  server certificate fingerprint (optional if trusted)
 #   PBS_PASSWORD     (optional)
-#
-# Invocation:
-#   LXC (inside container):
-#     bash restore.sh /mnt/backups/plex-backup-minimal-20260624-010000.tar.gz
-#
-#   Docker (inside container):
-#     docker exec plex bash -c "curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/restore.sh | bash -s -- /backups/plex-backup-minimal-20260624-010000.tar.gz"
-#
-#   Docker host (stops/starts container around restore):
-#     curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/restore.sh \
-#       | bash -s -- /opt/plex/backups/plex-backup-minimal-20260624-010000.tar.gz --container plex
 set -euo pipefail
 
 BACKUP_FILE=""
@@ -30,8 +24,8 @@ CONTAINER=""
 PBS=0
 PBS_SNAPSHOT=""
 FORCE=0
+LIST_ONLY=0
 
-# First arg may be positional (tar.gz path) or a flag
 if [[ $# -gt 0 ]] && [[ "$1" != --* ]]; then
     BACKUP_FILE="$1"
     shift
@@ -43,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --pbs)        PBS=1;               shift ;;
         --snapshot)   PBS_SNAPSHOT="$2";   shift 2 ;;
         --force)      FORCE=1;             shift ;;
+        --list)       LIST_ONLY=1;         shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -72,10 +67,9 @@ plex_stop() {
         echo "[restore] Stopping Docker container: ${CONTAINER}..."
         docker stop "$CONTAINER" 2>/dev/null || true
     elif [[ $HAS_SYSTEMCTL -eq 1 ]]; then
-        echo "[restore] Stopping plexmediaserver (systemctl)..."
+        echo "[restore] Stopping plexmediaserver..."
         systemctl stop plexmediaserver 2>/dev/null || true
     elif pgrep -f "Plex Media Server" > /dev/null 2>&1; then
-        echo "[restore] Stopping Plex Media Server (pkill)..."
         pkill -f "Plex Media Server" || true
         sleep 3
     fi
@@ -83,77 +77,93 @@ plex_stop() {
 
 plex_start() {
     if [[ -n "$CONTAINER" ]]; then
-        echo "[restore] Starting Docker container: ${CONTAINER}..."
         docker start "$CONTAINER" 2>/dev/null || true
     elif [[ $HAS_SYSTEMCTL -eq 1 ]]; then
-        echo "[restore] Starting plexmediaserver (systemctl)..."
         systemctl start plexmediaserver 2>/dev/null || true
-        echo "[restore] Plex started."
+    fi
+}
+
+# ── Backup dir scan ───────────────────────────────────────────────────────────
+find_backup_dir() {
+    if [[ -n "${BACKUP_DIR:-}" ]] && [[ -d "$BACKUP_DIR" ]]; then
+        echo "$BACKUP_DIR"
+    elif [[ -d /mnt/backups ]]; then
+        echo "/mnt/backups"
+    elif [[ -d /backups ]]; then
+        echo "/backups"
+    else
+        echo "$(pwd)"
     fi
 }
 
 # ── PBS path ─────────────────────────────────────────────────────────────────
 if [[ $PBS -eq 1 ]]; then
     [[ -n "${PBS_REPOSITORY:-}" ]] || { echo "[restore] PBS_REPOSITORY is required for --pbs" >&2; exit 1; }
-    command -v proxmox-backup-client > /dev/null 2>&1 || {
-        echo "[restore] proxmox-backup-client not found." >&2; exit 1
-    }
+    command -v proxmox-backup-client > /dev/null 2>&1 || { echo "[restore] proxmox-backup-client not found." >&2; exit 1; }
 
-    # List snapshots if no specific one requested
+    echo "[restore] Available PBS snapshots (host/plex):"
+    proxmox-backup-client snapshots "host/plex" 2>/dev/null || { echo "[restore] No snapshots found." >&2; exit 1; }
+    echo ""
+
+    if [[ $LIST_ONLY -eq 1 ]]; then exit 0; fi
+
     if [[ -z "$PBS_SNAPSHOT" ]]; then
-        echo "[restore] Available PBS snapshots for host/plex:"
-        proxmox-backup-client snapshots "host/plex"
-        echo ""
-        # Pick latest
         PBS_SNAPSHOT=$(proxmox-backup-client snapshots "host/plex" 2>/dev/null \
-            | grep -v '^Backup' | awk '{print $3}' | sort | tail -1)
-        [[ -n "$PBS_SNAPSHOT" ]] || { echo "[restore] No PBS snapshots found for host/plex" >&2; exit 1; }
-        echo "[restore] Using latest snapshot: ${PBS_SNAPSHOT}"
+            | tail -n +2 | awk '{print $3}' | sort | tail -1)
+        [[ -n "$PBS_SNAPSHOT" ]] || { echo "[restore] No PBS snapshots found." >&2; exit 1; }
+        echo "[restore] Using latest: ${PBS_SNAPSHOT}"
     fi
 
-    echo "[restore] PBS snapshot: ${PBS_SNAPSHOT}"
-    echo "[restore] Target: ${PMS_DIR}"
-
     if [[ $FORCE -eq 0 ]]; then
-        read -r -p "[restore] This will overwrite existing Plex config. Continue? [y/N] " confirm
-        [[ "${confirm,,}" == "y" ]] || { echo "[restore] Aborted."; exit 0; }
+        echo "[restore] Restoring from PBS snapshot ${PBS_SNAPSHOT} in 3 seconds — Ctrl-C to abort"
+        sleep 3
     fi
 
     plex_stop
     trap plex_start EXIT
-
     mkdir -p "$PMS_DIR"
-    echo "[restore] Restoring from PBS..."
     proxmox-backup-client restore "host/plex/${PBS_SNAPSHOT}" "plex-config.pxar" "$PMS_DIR"
-
-    if getent passwd plex > /dev/null 2>&1; then
-        chown -R plex:plex "$DATA_DIR"
-    fi
-
+    getent passwd plex > /dev/null 2>&1 && chown -R plex:plex "$DATA_DIR" || true
     echo "[restore] Done. Restored to: ${PMS_DIR}"
     exit 0
 fi
 
 # ── tar.gz path ───────────────────────────────────────────────────────────────
-[[ -n "$BACKUP_FILE" ]] || { echo "Usage: $0 <backup-file.tar.gz> [--force]  OR  $0 --pbs [--snapshot TS] [--force]" >&2; exit 1; }
+BACKUP_SEARCH_DIR=$(find_backup_dir)
+
+if [[ -z "$BACKUP_FILE" ]]; then
+    # List available backups
+    mapfile -t BACKUPS < <(find "$BACKUP_SEARCH_DIR" -maxdepth 1 -name 'plex-backup-*.tar.gz' | sort -r)
+
+    if [[ ${#BACKUPS[@]} -eq 0 ]]; then
+        echo "[restore] No backups found in ${BACKUP_SEARCH_DIR}" >&2
+        exit 1
+    fi
+
+    echo "[restore] Available backups in ${BACKUP_SEARCH_DIR}:"
+    for i in "${!BACKUPS[@]}"; do
+        echo "  [$i] ${BACKUPS[$i]##*/}"
+    done
+    echo ""
+
+    if [[ $LIST_ONLY -eq 1 ]]; then exit 0; fi
+
+    BACKUP_FILE="${BACKUPS[0]}"
+    echo "[restore] Using latest: ${BACKUP_FILE##*/}"
+fi
+
 [[ -f "$BACKUP_FILE" ]] || { echo "[restore] Error: backup file not found: $BACKUP_FILE" >&2; exit 1; }
 
-echo "[restore] Backup: ${BACKUP_FILE}"
-echo "[restore] Target: ${DATA_DIR}"
-
 if [[ $FORCE -eq 0 ]]; then
-    read -r -p "[restore] This will overwrite existing Plex config. Continue? [y/N] " confirm
-    [[ "${confirm,,}" == "y" ]] || { echo "[restore] Aborted."; exit 0; }
+    echo "[restore] Restoring ${BACKUP_FILE##*/} in 3 seconds — Ctrl-C to abort"
+    sleep 3
 fi
 
 plex_stop
 trap plex_start EXIT
 
-echo "[restore] Extracting..."
+echo "[restore] Extracting to ${DATA_DIR}..."
 tar -xzf "$BACKUP_FILE" -C "$DATA_DIR"
-
-if getent passwd plex > /dev/null 2>&1; then
-    chown -R plex:plex "$DATA_DIR"
-fi
+getent passwd plex > /dev/null 2>&1 && chown -R plex:plex "$DATA_DIR" || true
 
 echo "[restore] Done. Restored to: ${DATA_DIR}"

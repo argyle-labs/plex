@@ -7,16 +7,10 @@
 #   --pbs              Push to Proxmox Backup Server via proxmox-backup-client
 #   --pbs-prune-only   Prune PBS snapshots without taking a new backup
 #
-# Invocation:
-#   LXC (inside container):
-#     bash backup.sh [--complete]
-#
-#   Docker (inside container):
-#     docker exec plex bash -c "curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh | bash"
-#
-#   Docker host (stops/starts container):
-#     curl -fsSL https://raw.githubusercontent.com/argyle-labs/plex/main/scripts/backup.sh \
-#       | bash -s -- --container plex --output /opt/plex/backups
+# Invocation (installed as /usr/local/bin/backup by install.sh):
+#   LXC:    pct exec <vmid> -- backup [--complete]
+#   Docker: docker exec plex backup [--complete]
+#   Host:   backup --container plex --output /opt/plex/backups
 #
 # PBS env vars (required for --pbs):
 #   PBS_REPOSITORY   e.g. backup@pbs@<ip>:datastore

@@ -11,10 +11,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LIBVA_DRIVER_NAME=auto
 
 COPY scripts/install.sh /tmp/install.sh
-RUN chmod +x /tmp/install.sh && /tmp/install.sh "${PLEX_VERSION}" && rm /tmp/install.sh
+RUN chmod +x /tmp/install.sh && SKIP_SCRIPT_DOWNLOAD=1 /tmp/install.sh "${PLEX_VERSION}" && rm /tmp/install.sh
 
 COPY scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY scripts/backup.sh /usr/local/bin/backup
+COPY scripts/restore.sh /usr/local/bin/restore
+RUN chmod +x /entrypoint.sh /usr/local/bin/backup /usr/local/bin/restore
 
 EXPOSE 32400
 
