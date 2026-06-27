@@ -34,7 +34,7 @@ crate-type = ["cdylib", "rlib"]
 # The committed `[patch]` in `.cargo/config.toml` overrides this to the local
 # in-tree toolkit for development; the git tag is what an external checkout
 # without the orca repo resolves against.
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", tag = "v0.0.8-rc.7" }
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main" }
 
 # Genuinely-external, non-orca runtime deps emitted by progenitor's generated
 # client (`src/api`). progenitor hard-codes these crate paths in its output, so
@@ -74,7 +74,7 @@ wiremock = "0.6"
 tempfile = "3"
 
 [build-dependencies]
-plugin-toolkit-build = { git = "https://github.com/argyle-labs/orca", tag = "v0.0.8-rc.7" }
+plugin-toolkit-build = { git = "https://github.com/argyle-labs/orca", branch = "main" }
 
 # Match orca's workspace lint floor: discarding a Result/Option via
 # `let _ = ...` was a load-bearing past incident, so keep it a hard error here

@@ -1,4 +1,4 @@
-// The tool surface crosses this FFI boundary as opaque JSON — the designated
+// The tool surface crosses this FFI boundary as opaque JSON â the designated
 // JSON dispatch seam, identical to orca's `plugin-loader` and
 // `dispatch::ErasedTool::run_json`. The payload type is aliased (`sj`) at this
 // one seam, exactly as the loader aliases it, and the workspace
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 // The `#[export_root_module]` attribute expands to bare `::abi_stable` paths in
-// this crate's root, so `abi_stable` must be a direct dependency — it is a
+// this crate's root, so `abi_stable` must be a direct dependency â it is a
 // genuinely-external (non-orca) crate, exactly like the progenitor/serde deps
 // the generated client carries. Pinned to the toolkit's version so the layout
 // hash the loader checks matches.
@@ -54,7 +54,7 @@ extern "C" fn orca_compat() -> RString {
 }
 
 /// Tool-name prefix this plugin owns. The cdylib statically links the toolkit's
-/// domain crates (containers / notifications / …), each of which carries its
+/// domain crates (containers / notifications / â¦), each of which carries its
 /// own `#[orca_tool]` inventory entries, so the raw `tool_manifest_json()` walk
 /// returns those host-owned tools alongside the plugin's. The plugin exposes
 /// only its own `plex.*` namespace across the ABI; the host already owns the
@@ -133,6 +133,14 @@ extern "C" fn invoke(name: RStr<'_>, args_json: RStr<'_>) -> RResult<RString, RS
     }
 }
 
+/// Domain backends this plugin contributes. Pure tool-surface plugin (no
+/// storage/etc. backend), so it contributes none — an empty array, identical to
+/// what the toolkit per-field default would synthesize for a plugin that predates
+/// the `backends` ABI field.
+extern "C" fn backends() -> RString {
+    RString::from("[]")
+}
+
 #[export_root_module]
 fn export() -> PluginModRef {
     PluginMod {
@@ -142,6 +150,7 @@ fn export() -> PluginModRef {
         orca_compat,
         manifest,
         invoke,
+        backends,
     }
     .leak_into_prefix()
 }
