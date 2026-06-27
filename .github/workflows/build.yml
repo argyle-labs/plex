@@ -5,13 +5,13 @@ name: Build and Push
 
 on:
   push:
-    branches: [main]
+    branches: [dev, stage, main]
     paths:
       - Dockerfile
       - scripts/**
       - .github/workflows/build.yml
   pull_request:
-    branches: [main]
+    branches: [dev, main]
     paths:
       - Dockerfile
       - scripts/**

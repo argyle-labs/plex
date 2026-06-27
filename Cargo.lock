@@ -2265,6 +2265,7 @@ dependencies = [
  "derive",
  "dispatch",
  "futures-core",
+ "futures-util",
  "graphql",
  "graphql_client",
  "inventory",
@@ -2280,10 +2281,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "storage",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "urlencoding",
  "utils",
  "uuid",
 ]
@@ -3248,6 +3251,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "storage"
+version = "0.0.8-rc.8"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3783,6 +3799,12 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "utf8_iter"

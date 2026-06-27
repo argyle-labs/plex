@@ -1,0 +1,37 @@
+name: Release
+
+# Thin caller stub → orca's reusable Plugin Release.
+# Run from `stage` (alpha/beta/rc pre-release) or `main` (stable).
+#   Actions → Release → Run workflow → pick branch + bump + channel.
+#
+# NOTE: until orca's reusable workflows reach `main`, pin `@dev` temporarily,
+# then flip `@dev` → `@main` once they're merged.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump from latest stable
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      channel:
+        description: Release channel
+        required: true
+        type: choice
+        options: [stable, alpha, beta, rc]
+        default: rc
+      notes:
+        description: Extra release notes (optional, prepended to changelog)
+        required: false
+        type: string
+
+jobs:
+  release:
+    uses: argyle-labs/orca/.github/workflows/plugin-release.yml@main
+    secrets: inherit
+    with:
+      bump:    ${{ inputs.bump }}
+      channel: ${{ inputs.channel }}
+      notes:   ${{ inputs.notes }}
