@@ -1,7 +1,7 @@
 name: Release
 
 # Thin caller stub → orca's reusable Plugin Release.
-# Run from `stage` (alpha/beta/rc pre-release) or `main` (stable).
+# Run from `main`; the `channel` input picks stable vs alpha/beta/rc.
 #   Actions → Release → Run workflow → pick branch + bump + channel.
 #
 # NOTE: until orca's reusable workflows reach `main`, pin `@dev` temporarily,
