@@ -86,11 +86,7 @@ async fn run(cmd: &mut Command) -> Result<Output> {
         .with_context(|| "failed to spawn command".to_string())?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "command failed ({}): {}",
-            output.status,
-            stderr.trim()
-        );
+        bail!("command failed ({}): {}", output.status, stderr.trim());
     }
     Ok(output)
 }
@@ -165,9 +161,7 @@ pub struct PlexInstallOutput {
 async fn plex_install(args: PlexInstallArgs, _ctx: &ToolCtx) -> Result<PlexInstallOutput> {
     let output = match args.runtime {
         Runtime::Lxc => {
-            let vmid = args
-                .vmid
-                .context("`vmid` is required when runtime=lxc")?;
+            let vmid = args.vmid.context("`vmid` is required when runtime=lxc")?;
             let script = args
                 .bootstrap_path
                 .clone()
@@ -189,7 +183,11 @@ async fn plex_install(args: PlexInstallArgs, _ctx: &ToolCtx) -> Result<PlexInsta
                 .clone()
                 .unwrap_or_else(|| "compose.yml".to_string());
             let mut cmd = Command::new("docker");
-            cmd.arg("compose").arg("-f").arg(&compose).arg("up").arg("-d");
+            cmd.arg("compose")
+                .arg("-f")
+                .arg(&compose)
+                .arg("up")
+                .arg("-d");
             run(&mut cmd).await?
         }
     };
@@ -470,7 +468,9 @@ mod tests {
         std::fs::create_dir_all(config.join("Databases")).unwrap();
         std::fs::write(config.join("Preferences.xml"), b"<Preferences/>").unwrap();
         std::fs::write(
-            config.join("Databases").join("com.plexapp.plugins.library.db"),
+            config
+                .join("Databases")
+                .join("com.plexapp.plugins.library.db"),
             b"sqlite",
         )
         .unwrap();

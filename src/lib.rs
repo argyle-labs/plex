@@ -81,12 +81,7 @@ pub enum PlexError {
 }
 
 /// Server identity from `/` (the root `MediaContainer`).
-#[derive(
-    Debug,
-    Clone,
-    plugin_toolkit::serde::Serialize,
-    plugin_toolkit::serde::Deserialize,
-)]
+#[derive(Debug, Clone, plugin_toolkit::serde::Serialize, plugin_toolkit::serde::Deserialize)]
 #[serde(crate = "plugin_toolkit::serde")]
 pub struct ServerInfo {
     pub friendly_name: Option<String>,
@@ -119,12 +114,7 @@ struct RootContainer {
 }
 
 /// One library section from `/library/sections/all`.
-#[derive(
-    Debug,
-    Clone,
-    plugin_toolkit::serde::Serialize,
-    plugin_toolkit::serde::Deserialize,
-)]
+#[derive(Debug, Clone, plugin_toolkit::serde::Serialize, plugin_toolkit::serde::Deserialize)]
 #[serde(crate = "plugin_toolkit::serde")]
 pub struct LibrarySection {
     pub key: Option<String>,
