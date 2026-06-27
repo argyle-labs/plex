@@ -54,4 +54,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        # Not --locked: the dep tracks orca's `dev` branch (a moving git source),
+        # and the committed lockfile reflects the local-dev path patch, so CI
+        # resolves fresh against dev.
+        run: cargo test
