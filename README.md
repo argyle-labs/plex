@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon-256.png" width="120" alt="plex" />
+</p>
+
 # plex
 
 Self-hosted Plex Media Server with automatic GPU detection and hardware transcoding.
