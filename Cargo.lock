@@ -554,6 +554,7 @@ dependencies = [
  "contract",
  "derive",
  "dispatch",
+ "futures-util",
  "inventory",
  "macro-runtime",
  "notifications",
@@ -802,6 +803,19 @@ name = "deadpool-runtime"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+
+[[package]]
+name = "deploy-target"
+version = "0.0.8-rc.9"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
 
 [[package]]
 name = "der"
@@ -2273,6 +2287,7 @@ dependencies = [
  "containers",
  "contract",
  "db",
+ "deploy-target",
  "derive",
  "dispatch",
  "futures-core",
