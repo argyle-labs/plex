@@ -208,6 +208,26 @@ docker exec plex vainfo --display drm --device /dev/dri/renderD128
 
 ---
 
+## Podman / Compose
+
+The same [`compose.yml`](compose.yml) runs under Podman. Because this service
+uses device passthrough (`/dev/dri`) and `network_mode: host`, run it
+**rootful** for hardware access:
+
+```sh
+sudo podman compose -f compose.yml up -d
+# older Podman: sudo podman-compose -f compose.yml up -d
+```
+
+Rootless Podman works for software-only transcode, but GPU devices and host
+networking are simplest rootful. Persist across reboots with a generated unit:
+
+```sh
+sudo podman generate systemd --new --name plex \
+  > /etc/systemd/system/plex.service
+sudo systemctl enable --now plex
+```
+
 ## NVIDIA Prerequisites
 
 NVIDIA requires `nvidia-container-toolkit` on the host:
