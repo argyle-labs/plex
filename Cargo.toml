@@ -2,7 +2,11 @@
 name = "plex"
 version = "0.1.0"
 edition = "2021"
+description = "Self-hosted Plex Media Server with GPU hardware transcoding — orca lifecycle/diagnostics"
 build = "build.rs"
+
+[package.metadata.orca]
+category = "media"
 
 [lib]
 name = "plex"
