@@ -1,0 +1,35 @@
+# Plex - Media Server
+# docs: ../../docs/services/plex.md
+
+services:
+  plex:
+    container_name: plex
+    image: lscr.io/linuxserver/plex:${PLEX_IMAGE_TAG:-latest}
+    environment:
+      - TZ=${TZ:-America/Denver}
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:32400/web/index.html"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    ports:
+      - "32400:32400"
+    volumes:
+      - ${PLEX_CONFIG_PATH:-./config}:/config
+      - type: tmpfs
+        target: /transcode
+        tmpfs:
+          size: 8G
+          mode: 1777
+      - ${MEDIA_PATH:-/mnt/<pool>/data/media}:/data
+    # Intel QuickSync hardware transcoding via iGPU passthrough
+    devices:
+      - /dev/dri:/dev/dri
+    # NVIDIA GPU (alternative):
+    # runtime: nvidia
+    # environment:
+    #   - NVIDIA_VISIBLE_DEVICES=all
+    restart: unless-stopped

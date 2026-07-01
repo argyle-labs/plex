@@ -2308,6 +2308,7 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "service",
  "sha2 0.11.0",
  "storage",
  "thiserror 2.0.18",
@@ -3137,6 +3138,19 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "service"
+version = "0.0.8-rc.9"
+dependencies = [
+ "anyhow",
+ "deploy-target",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
