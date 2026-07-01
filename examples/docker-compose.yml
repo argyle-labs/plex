@@ -1,0 +1,40 @@
+# Plex Media Server — this repo's self-built image (ghcr.io/argyle-labs/plex).
+#
+# ONE implementation. GPU and transcode-scratch are independent OPTIONS you mix
+# and match — not separate setups:
+#   • GPU        Intel/AMD via /dev/dri (default) — OR — NVIDIA via the nvidia runtime
+#   • Transcode  a disk path (default) — OR — tmpfs (RAM), orthogonal to the GPU choice
+#   • Claim      set PLEX_CLAIM on first run to bind the server to your account
+#
+# For the upstream image instead of ours, see docker-compose.upstream.yml.
+# Runs the same with podman: `podman compose up -d`.
+
+services:
+  plex:
+    image: ghcr.io/argyle-labs/plex:latest
+    container_name: plex
+    network_mode: host          # Plex serves on :32400 (http://<host>:32400/web)
+    restart: unless-stopped
+    shm_size: 4g
+    environment:
+      PLEX_UID: "1000"
+      PLEX_GID: "1000"
+      LIBVA_DRIVER_NAME: auto    # auto-detects Intel iHD/i965 or AMD radeonsi
+      # PLEX_CLAIM: "claim-xxxx" # from https://plex.tv/claim (valid ~4 min) — first run only
+      # ── NVIDIA option ── uncomment these + `runtime: nvidia` below,
+      #    and remove the `devices:` block (that's the Intel/AMD path):
+      # NVIDIA_VISIBLE_DEVICES: all
+      # NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    # runtime: nvidia            # NVIDIA option — needs nvidia-container-toolkit on the host
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /opt/plex/config:/config
+      - /opt/plex/transcode:/transcode   # disk transcode scratch (default)
+      - /mnt/media:/mnt/media:ro
+    devices:                     # Intel/AMD GPU — omit on an NVIDIA-only host
+      - /dev/dri/renderD128
+      - /dev/dri/card0
+    # ── tmpfs (RAM) transcode option ── delete the /transcode volume line above
+    #    and uncomment this to keep transcode scratch in RAM (raise shm_size to match):
+    # tmpfs:
+    #   - /transcode:size=4g,mode=1777

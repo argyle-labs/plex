@@ -1,0 +1,34 @@
+# Plex Media Server — official upstream image (plexinc/pms-docker).
+#
+# Identical shape and options to docker-compose.yml; you are NOT tied to our
+# build. LinuxServer.io's `lscr.io/linuxserver/plex` also drops in (it uses
+# PUID/PGID and a /config layout). Same GPU/transcode options apply — see the
+# comments in docker-compose.yml.
+
+services:
+  plex:
+    image: plexinc/pms-docker:latest   # or :beta (Plex Pass) / :public (pinned stable)
+    container_name: plex
+    network_mode: host          # Plex serves on :32400 (http://<host>:32400/web)
+    restart: unless-stopped
+    shm_size: 4g
+    environment:
+      TZ: Etc/UTC
+      PLEX_UID: "1000"
+      PLEX_GID: "1000"
+      # PLEX_CLAIM: "claim-xxxx" # from https://plex.tv/claim (valid ~4 min) — first run only
+      # ── NVIDIA option ── uncomment these + `runtime: nvidia`, remove `devices:`:
+      # NVIDIA_VISIBLE_DEVICES: all
+      # NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    # runtime: nvidia            # NVIDIA option — needs nvidia-container-toolkit
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /opt/plex/config:/config
+      - /opt/plex/transcode:/transcode   # disk transcode scratch (default)
+      - /mnt/media:/mnt/media:ro
+    devices:                     # Intel/AMD GPU — omit on an NVIDIA-only host
+      - /dev/dri/renderD128
+      - /dev/dri/card0
+    # ── tmpfs (RAM) transcode option ── replace the /transcode volume above:
+    # tmpfs:
+    #   - /transcode:size=4g,mode=1777
