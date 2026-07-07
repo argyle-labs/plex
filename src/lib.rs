@@ -34,6 +34,7 @@
 pub mod abi_export;
 pub mod diag;
 pub mod lifecycle;
+pub mod storage;
 pub mod tools;
 
 use plugin_toolkit::http::{Client as HttpClient, HttpError, Response};

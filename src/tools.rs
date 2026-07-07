@@ -43,8 +43,7 @@ pub struct PlexEndpoint {
 // ── HTTP client helper ──────────────────────────────────────────────────────
 
 fn make_client(name: &str) -> Result<Client> {
-    let conn = runtime::open_db()?;
-    let row = endpoint_db::get(&conn, name)?
+    let row = endpoint_db::get(name)?
         .with_context(|| format!("plex endpoint '{name}' not registered"))?;
     if !row.enabled {
         bail!("plex endpoint '{name}' is disabled");
