@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::Output;
 
 use plugin_toolkit::prelude::*;
-use plugin_toolkit::tokio::process::Command;
+use tokio::process::Command;
 
 /// Where a Plex instance is deployed — selects which runtime the lifecycle
 /// tools drive.
