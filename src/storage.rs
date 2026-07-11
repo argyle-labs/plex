@@ -26,7 +26,7 @@
 #![allow(clippy::disallowed_types)]
 
 use plugin_toolkit::prelude::*;
-use plugin_toolkit::tokio::process::Command;
+use tokio::process::Command;
 
 use crate::lifecycle::Runtime;
 

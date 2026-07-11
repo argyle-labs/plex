@@ -11,10 +11,14 @@ category = "media"
 [lib]
 name = "plex"
 path = "src/lib.rs"
-# `cdylib` is the orca plugin artifact orca's `plugin-loader` `dlopen`s;
 # `rlib` retains the in-crate `#[cfg(test)]` harness + lets the workspace use it
-# as a normal Rust lib.
-crate-type = ["cdylib", "rlib"]
+# as a normal Rust lib. The plugin now ships as the `[[bin]]` below — a dynamic
+# subprocess the loader spawns, not a dlopened cdylib.
+crate-type = ["rlib"]
+
+[[bin]]
+name = "plex"
+path = "src/main.rs"
 
 # Plex media-server plugin. Typed client codegenned by progenitor from the
 # vendored upstream spec (`specs/plex.openapi.json`, OpenAPI 3.1.1, MIT). The
@@ -54,12 +58,6 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 thiserror   = "2"
 
-# The `#[export_root_module]` macro (re-exported by the toolkit) expands to bare
-# `::abi_stable` paths in this crate's root, so abi_stable must be a direct dep.
-# Pinned to the orca workspace version (0.11) so the layout hash baked into the
-# cdylib matches what orca's plugin-loader checks at load time.
-abi_stable = "0.11"
-
 progenitor-client = "0.14"
 futures-core = "0.3"
 bytes       = "1"
@@ -71,9 +69,12 @@ reqwest     = { version = "0.13", default-features = false, features = ["json", 
 # progenitor emits `::chrono` / `::uuid` paths for date-time + uuid formats.
 chrono      = { version = "0.4", features = ["serde"] }
 uuid        = { version = "1", features = ["serde", "v4"] }
+# Direct dep now that the toolkit no longer re-exports `::tokio` (dropped in the
+# dynamic-entry toolkit series). lifecycle/storage drive `tokio::process::Command`
+# for install/update/backup/restore, so the plugin owns its async runtime deps.
+tokio       = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 
 [dev-dependencies]
-tokio    = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 tempfile = "3"
 
