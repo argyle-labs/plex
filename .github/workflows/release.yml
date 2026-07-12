@@ -26,6 +26,8 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: write
 jobs:
   release:
     uses: argyle-labs/.github/.github/workflows/plugin-release.yml@main
