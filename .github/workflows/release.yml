@@ -1,20 +1,10 @@
 name: Release
 
-# Self-contained plugin release with pipeline-managed versioning. Builds the
-# cdylib against orca `main` and publishes a GitHub Release with the artifact +
-# sha256. The operator never edits Cargo.toml — the pipeline computes the next
-# version from the repo's own git tags:
+# Thin caller: the whole release flow lives ONCE in the org reusable
+# argyle-labs/.github → .github/workflows/plugin-release.yml. This repo just
+# forwards the manual dispatch inputs. See that file for version math + artifact
+# staging (plugin binary + sha256, built against orca `main`).
 #   Actions → Release → Run workflow → channel (rc | stable) + bump.
-#
-# Version math (mirrors orca's compute_rc_version, one logic across all repos):
-#   • base = highest `vX.Y.Z` stable tag (v0.0.0 if none), bumped by `bump`
-#     (patch | minor | major).
-#   • channel=rc     → `v<base>-rc.<n>`, n = next free rc index for that base
-#     (prerelease).
-#   • channel=stable → `v<base>` (full release).
-# The computed version is written into Cargo.toml at build time so the cdylib
-# embeds the right CARGO_PKG_VERSION; the git tag is the source of truth, so the
-# committed Cargo.toml version is never hand-managed.
 
 on:
   workflow_dispatch:
@@ -36,107 +26,11 @@ on:
         required: false
         type: string
 
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
-
-permissions:
-  contents: write
-
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-
 jobs:
   release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Drop local-dev cargo patch
-        run: rm -f .cargo/config.toml
-
-      - name: Authenticate private orca git dependency
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ secrets.ORCA_FETCH_TOKEN }}@github.com/".insteadOf \
-            "https://github.com/"
-
-      - name: Compute next version from tags
-        id: ver
-        run: |
-          set -euo pipefail
-          git fetch --tags --quiet || true
-          latest_stable=$(git tag -l 'v[0-9]*' \
-            | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
-            | sort -V | tail -1)
-          latest_stable=${latest_stable:-v0.0.0}
-          IFS='.' read -r major minor patch <<< "${latest_stable#v}"
-          case "${{ inputs.bump }}" in
-            major) major=$((major+1)); minor=0; patch=0 ;;
-            minor) minor=$((minor+1)); patch=0 ;;
-            patch) patch=$((patch+1)) ;;
-            *) echo "::error::bump must be patch|minor|major"; exit 1 ;;
-          esac
-          base="${major}.${minor}.${patch}"
-          if [ "${{ inputs.channel }}" = "stable" ]; then
-            version="$base"; tag="v$base"; prerelease=false
-          else
-            latest_rc=$(git tag -l "v${base}-rc.*" | sort -V | tail -1)
-            if [ -z "$latest_rc" ]; then n=1; else n=${latest_rc##*rc.}; n=$((n+1)); fi
-            version="${base}-rc.${n}"; tag="v${version}"; prerelease=true
-          fi
-          {
-            echo "version=$version"
-            echo "tag=$tag"
-            echo "prerelease=$prerelease"
-            echo "previous_stable=$latest_stable"
-          } >> "$GITHUB_OUTPUT"
-          echo "→ ${{ inputs.channel }} (${{ inputs.bump }}) from ${latest_stable}: $tag"
-
-      - name: Write computed version into Cargo.toml
-        run: |
-          set -euo pipefail
-          sed -i 's/^version = ".*"/version = "${{ steps.ver.outputs.version }}"/' Cargo.toml
-          grep -m1 '^version = ' Cargo.toml
-
-      - name: Build release cdylib
-        run: cargo build --release
-
-      - name: Stage artifact
-        id: meta
-        run: |
-          set -euo pipefail
-          name=$(grep -m1 '^name = ' Cargo.toml | sed -E 's/name = "(.*)"/\1/')
-          libname=$(echo "$name" | tr - _)
-          so="target/release/lib${libname}.so"
-          if [ ! -f "$so" ]; then
-            echo "::error::cdylib not found at $so"; ls -la target/release; exit 1
-          fi
-          asset="${name}-${{ steps.ver.outputs.tag }}-x86_64-unknown-linux-gnu.so"
-          cp "$so" "$asset"
-          sha256sum "$asset" > "${asset}.sha256"
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release (pipeline-tagged)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          flags=""
-          [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && flags="--prerelease"
-          notes="${{ inputs.notes }}"
-          [ -z "$notes" ] && notes="Automated ${{ inputs.channel }} release of \`${{ github.repository }}\`, built against orca \`main\` (x86_64-unknown-linux-gnu)."
-          gh release create "${{ steps.ver.outputs.tag }}" \
-            --target "${{ github.sha }}" \
-            --title "${{ steps.ver.outputs.tag }}" \
-            --notes "$notes" \
-            $flags \
-            "${{ steps.meta.outputs.asset }}" \
-            "${{ steps.meta.outputs.asset }}.sha256"
+    uses: argyle-labs/.github/.github/workflows/plugin-release.yml@main
+    secrets: inherit
+    with:
+      channel: ${{ inputs.channel }}
+      bump: ${{ inputs.bump }}
+      notes: ${{ inputs.notes }}
