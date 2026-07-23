@@ -22,6 +22,7 @@
 
 use plugin_toolkit::prelude::*;
 
+use crate::account::{self, PresenceStatus, ServerPresence};
 use crate::diag::SessionTranscodeHealth;
 use crate::{Client, Config, LibrarySection, ServerInfo};
 
@@ -49,6 +50,96 @@ fn make_client(name: &str) -> Result<Client> {
         bail!("plex endpoint '{name}' is disabled");
     }
     Ok(Client::new(Config::new(row.base_url, row.token)))
+}
+
+/// Resolve just the token for a registered endpoint. Used by the plex.tv
+/// account probe, which ignores `base_url` (it always targets plex.tv) and
+/// treats the endpoint's token as the account token. The secret never leaves
+/// this boundary — it is passed straight into the account probe and never
+/// logged or returned.
+pub(crate) fn endpoint_token(name: &str) -> Result<String> {
+    let row = endpoint_db::get(name)?
+        .with_context(|| format!("plex endpoint '{name}' not registered"))?;
+    if !row.enabled {
+        bail!("plex endpoint '{name}' is disabled");
+    }
+    Ok(row.token)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// plex.discover — SYNTHETIC-PLAYER PRESENCE HEALTH (+ tier-1 self-heal)
+//
+// Queries plex.tv for the account's owned servers and reports each one's
+// announce freshness. This is the health check local signals can't provide: a
+// server can be fully healthy in-CT yet invisible to players because its
+// plex.tv announce went stale (the 2026-07-22 mimir incident).
+//
+// The query IS the tier-1 re-announce nudge — running it periodically as a
+// heartbeat re-announces presence and prevents the drift. Idempotent, cheap,
+// mesh-independent; safe to schedule on a timer.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "plugin_toolkit::schemars")]
+pub struct PlexDiscoverArgs {
+    /// Registered endpoint whose token is used as the plex.tv account token.
+    pub endpoint: String,
+    /// Staleness threshold in seconds; announces older than this are `stale`.
+    /// Defaults to 600 (10 min).
+    pub threshold_secs: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct PlexDiscoverReport {
+    /// Per-owned-server presence with derived freshness verdict.
+    pub servers: Vec<ServerPresence>,
+    pub total: usize,
+    pub fresh: usize,
+    pub stale: usize,
+    pub unknown: usize,
+    /// Effective threshold applied (echoed for callers that omitted it).
+    pub threshold_secs: i64,
+    /// True when at least one owned server's announce is stale — the single
+    /// flag a caller branches on to escalate the remediation ladder.
+    pub any_stale: bool,
+}
+
+/// **Presence health.** Discover the account's owned Plex servers via plex.tv
+/// and report each one's announce freshness (`fresh` / `stale` / `unknown`).
+/// Detects the "healthy locally but invisible to players" failure and, by the
+/// act of querying, performs the tier-1 re-announce nudge.
+#[orca_tool(domain = "plex", verb = "discover")]
+async fn plex_discover(args: PlexDiscoverArgs, _ctx: &ToolCtx) -> Result<PlexDiscoverReport> {
+    let threshold = args
+        .threshold_secs
+        .unwrap_or(account::DEFAULT_THRESHOLD_SECS);
+    let token = endpoint_token(&args.endpoint)?;
+    let servers = account::probe(token, threshold).await?;
+
+    let fresh = servers
+        .iter()
+        .filter(|s| s.status == PresenceStatus::Fresh)
+        .count();
+    let stale = servers
+        .iter()
+        .filter(|s| s.status == PresenceStatus::Stale)
+        .count();
+    let unknown = servers
+        .iter()
+        .filter(|s| s.status == PresenceStatus::Unknown)
+        .count();
+
+    Ok(PlexDiscoverReport {
+        total: servers.len(),
+        fresh,
+        stale,
+        unknown,
+        threshold_secs: threshold,
+        any_stale: stale > 0,
+        servers,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

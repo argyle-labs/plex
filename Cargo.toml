@@ -3,7 +3,6 @@ name = "plex"
 version = "0.1.0"
 edition = "2021"
 description = "Self-hosted Plex Media Server with GPU hardware transcoding — orca lifecycle/diagnostics"
-build = "build.rs"
 
 [package.metadata.orca]
 category = "media"
@@ -20,66 +19,40 @@ crate-type = ["rlib"]
 name = "plex"
 path = "src/main.rs"
 
-# Plex media-server plugin. Typed client codegenned by progenitor from the
-# vendored upstream spec (`specs/plex.openapi.json`, OpenAPI 3.1.1, MIT). The
-# vendored document is 3.1, so `build.rs` rides the toolkit's 3.1→3.0 lowering
-# pass before pruning it to the handful of paths this plugin drives (`/`,
-# `/identity`, `/library/sections/all`, `/status/sessions`) plus their
-# transitive schema closure before codegen — see
-# `plugin_toolkit_build::openapi::generate_selected`.
-#
-# Update the spec by overwriting `specs/plex.openapi.json`.
+# Plex media-server plugin. All upstream HTTP goes through the orca-owned
+# `plugin_toolkit::http` seam — the plugin names no HTTP crate directly, so it
+# carries no `reqwest`/progenitor runtime of its own. Datetime goes through
+# `plugin_toolkit::time` (chrono confined to orca core). Only genuinely
+# plugin-owned runtime deps live here.
 
 [dependencies]
 # The SOLE orca dependency. All macro-emitted paths (`#[orca_tool]`,
 # `endpoint_resource!`, dispatch's `register_op!`) resolve through
 # `::plugin_toolkit::*`, and every orca primitive the plugin source touches
-# (serde / schemars / clap / anyhow / thiserror / inventory / db / rusqlite /
-# async-trait / dispatch / contract / derive / macro-runtime / http /
-# notifications / tokio) is re-exported by the toolkit + its prelude.
+# (serde / serde_json / schemars / clap / anyhow / thiserror / inventory / db /
+# rusqlite / async-trait / dispatch / contract / derive / macro-runtime / http /
+# time / notifications) is re-exported by the toolkit + its prelude.
 #
-# Pinned to the orca rc tag that carries the slice-1 plugin-toolkit surface.
 # The committed `[patch]` in `.cargo/config.toml` overrides this to the local
-# in-tree toolkit for development; the git tag is what an external checkout
+# in-tree toolkit for development; the git branch is what an external checkout
 # without the orca repo resolves against.
 plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main" }
 
-# Genuinely-external, non-orca runtime deps emitted by progenitor's generated
-# client (`src/api`). progenitor hard-codes these crate paths in its output, so
-# they cannot route through the toolkit — they are the plugin's own transitive
-# deps, exactly as a third-party plugin would carry.
-#
-# serde + serde_json + thiserror: progenitor's generated code and thiserror v2's
-# derive emit bare `::serde` / `::serde_json` / `::thiserror` crate-root paths
-# that no `crate = ...` attribute can redirect. These three are the codegen +
-# error-derive runtime — the plugin's own deps, exactly like a third-party
-# progenitor plugin.
+# serde / serde_json / thiserror: the toolkit's re-exported derives (`Serialize`,
+# `Deserialize`, `Error`) expand to bare `::serde` / `::thiserror` crate-root
+# paths, so these must be nameable direct deps. They are lightweight, unlike the
+# HTTP/codegen stack — which the plugin no longer carries.
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 thiserror   = "2"
 
-progenitor-client = "0.14"
-futures-core = "0.3"
-bytes       = "1"
-regress     = "0.10"
-# Must match the orca workspace pin (0.13) so progenitor's generated client and
-# the toolkit's http layer share one reqwest version — a mismatch produces
-# incompatible `reqwest::Client`/`Request` types across the api boundary.
-reqwest     = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
-# progenitor emits `::chrono` / `::uuid` paths for date-time + uuid formats.
-chrono      = { version = "0.4", features = ["serde"] }
-uuid        = { version = "1", features = ["serde", "v4"] }
-# Direct dep now that the toolkit no longer re-exports `::tokio` (dropped in the
-# dynamic-entry toolkit series). lifecycle/storage drive `tokio::process::Command`
-# for install/update/backup/restore, so the plugin owns its async runtime deps.
+# Async runtime: lifecycle/storage drive `tokio::process::Command` for
+# install/update/backup/restore/restart, so the plugin owns its process-exec dep.
 tokio       = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
-
-[build-dependencies]
-plugin-toolkit-build = { git = "https://github.com/argyle-labs/orca", branch = "main" }
 
 # Match orca's workspace lint floor: discarding a Result/Option via
 # `let _ = ...` was a load-bearing past incident, so keep it a hard error here

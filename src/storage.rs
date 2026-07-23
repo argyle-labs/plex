@@ -492,9 +492,10 @@ fn repair_sql(rw: &DriftRewrite) -> String {
     )
 }
 
-/// UTC `YYYYMMDD-HHMMSS` stamp for backup names.
+/// UTC `YYYYMMDD-HHMMSS` stamp for backup names, via the orca core datetime
+/// seam — the plugin bundles no datetime library of its own.
 fn now_stamp() -> String {
-    chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string()
+    plugin_toolkit::time::Timestamp::now().compact()
 }
 
 #[cfg(test)]

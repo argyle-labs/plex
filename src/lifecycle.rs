@@ -287,6 +287,105 @@ async fn plex_update(args: PlexUpdateArgs, _ctx: &ToolCtx) -> Result<PlexUpdateO
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// plex.restart — TIER-2 SELF-HEAL: bounce the Plex service in its guest
+//
+// The remediation rung above the tier-1 re-announce nudge (`plex.discover`).
+// When a server stays `stale` after the nudge, restarting plexmediaserver
+// forces a fresh plex.tv announce.
+//
+// Mesh-independent BY CONSTRUCTION: this drives the guest through the host's own
+// `pct exec` / `docker` via process exec — NOT through an orca mesh call. During
+// the 2026-07-22 mimir incident orca's lxc adapter on thor returned zero
+// containers and thor DNS was a trap; a host-local `pct exec` sidesteps both.
+// The verb is deliberately a bare action — the "restart only after N stale
+// probes" policy lives in the caller/orchestration, not baked in here.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(
+    plugin_toolkit::clap::Args,
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+pub struct PlexRestartArgs {
+    /// Where the instance runs: `lxc` or `docker`.
+    #[arg(long, value_enum, default_value_t = Runtime::Lxc)]
+    #[serde(default)]
+    pub runtime: Runtime,
+    /// LXC vmid (LXC runtime only). Required when `runtime=lxc`.
+    #[arg(long)]
+    #[serde(default)]
+    pub vmid: Option<u32>,
+    /// Docker container name (Docker runtime only).
+    #[arg(long, default_value = "plex")]
+    #[serde(default = "default_container")]
+    pub container: String,
+}
+
+fn default_container() -> String {
+    "plex".to_string()
+}
+
+#[derive(
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
+pub struct PlexRestartOutput {
+    /// True when the restart command completed successfully.
+    pub restarted: bool,
+    /// The runtime the restart targeted.
+    pub runtime: Runtime,
+    /// Combined stdout from the restart step.
+    pub log: String,
+}
+
+/// **Restart the Plex service in its guest (tier-2 self-heal).** On `lxc`, runs
+/// `systemctl restart plexmediaserver` inside the CT via `pct exec`. On
+/// `docker`, restarts the container. Forces a fresh plex.tv announce when the
+/// tier-1 nudge (`plex.discover`) is not enough. Runs host-local — no orca mesh
+/// dependency.
+#[orca_tool(domain = "plex", verb = "restart")]
+async fn plex_restart(args: PlexRestartArgs, _ctx: &ToolCtx) -> Result<PlexRestartOutput> {
+    restart_service(args).await
+}
+
+/// Restart logic, independent of the tool context so it is directly testable.
+/// `pub(crate)` so the remediation orchestrator can invoke tier-2 directly.
+pub(crate) async fn restart_service(args: PlexRestartArgs) -> Result<PlexRestartOutput> {
+    // Validate before spawning so a misconfigured call fails cleanly rather than
+    // shelling out with a missing vmid.
+    if matches!(args.runtime, Runtime::Lxc) && args.vmid.is_none() {
+        bail!("`vmid` is required when runtime=lxc");
+    }
+    let output = match args.runtime {
+        Runtime::Lxc => {
+            let vmid = args.vmid.expect("vmid presence checked above");
+            run(Command::new("pct")
+                .arg("exec")
+                .arg(vmid.to_string())
+                .arg("--")
+                .arg("systemctl")
+                .arg("restart")
+                .arg("plexmediaserver"))
+            .await?
+        }
+        Runtime::Docker => run(Command::new("docker").arg("restart").arg(&args.container)).await?,
+    };
+    Ok(PlexRestartOutput {
+        restarted: true,
+        runtime: args.runtime,
+        log: String::from_utf8_lossy(&output.stdout).into_owned(),
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // plex.backup — tar the /config volume to a destination
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -424,10 +523,10 @@ async fn restore_config(args: PlexRestoreArgs) -> Result<PlexRestoreOutput> {
     })
 }
 
-/// UTC timestamp `YYYYMMDD-HHMMSS` for archive names. Uses chrono (already a
-/// plugin dep via progenitor's date-time formats).
+/// UTC timestamp `YYYYMMDD-HHMMSS` for archive names, via the orca core datetime
+/// seam (`plugin_toolkit::time::Timestamp`) — no direct `chrono`.
 fn now_stamp() -> String {
-    chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string()
+    plugin_toolkit::time::Timestamp::now().compact()
 }
 
 #[cfg(test)]
@@ -439,6 +538,17 @@ mod tests {
         assert_eq!(Channel::Latest.image_tag(), "latest");
         assert_eq!(Channel::Beta.image_tag(), "beta");
         assert_eq!(Channel::Stable.image_tag(), "public");
+    }
+
+    #[tokio::test]
+    async fn restart_lxc_requires_vmid() {
+        let args = PlexRestartArgs {
+            runtime: Runtime::Lxc,
+            vmid: None,
+            container: "plex".to_string(),
+        };
+        let err = restart_service(args).await.unwrap_err();
+        assert!(err.to_string().contains("vmid` is required"), "{err}");
     }
 
     #[tokio::test]
