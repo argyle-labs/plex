@@ -1,11 +1,5 @@
 name: CI
 
-# Tests, lint, and formatting on the integration branch. Self-contained — no
-# cross-repo reusable workflow. The plugin's sole dependency, plugin-toolkit,
-# lives in the PRIVATE argyle-labs/orca repo, so CI authenticates the git fetch
-# with a repo Actions secret (ORCA_FETCH_TOKEN). Swap to a 1Password
-# service-account / fine-grained PAT later; the wiring (git insteadOf) is the same.
-
 on:
   push:
     branches: [main]
@@ -16,45 +10,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  # Resolve git deps via the git CLI so the tokenized `insteadOf` rewrite below
-  # is honored when fetching the private orca dependency.
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-
 jobs:
   ci:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Drop local-dev cargo patch
-        # .cargo/config.toml carries a developer-only `[patch]` redirecting
-        # plugin-toolkit to a local ../orca checkout, which doesn't exist in CI.
-        # Remove it so the pinned git dependency (private argyle-labs/orca,
-        # fetched via the token below) is used instead.
-        run: rm -f .cargo/config.toml
-
-      - name: Authenticate private orca git dependency
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ secrets.ORCA_FETCH_TOKEN }}@github.com/".insteadOf \
-            "https://github.com/"
-
-      - name: Formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint (clippy)
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Tests
-        # Not --locked: the dep tracks orca's `dev` branch (a moving git source),
-        # and the committed lockfile reflects the local-dev path patch, so CI
-        # resolves fresh against dev.
-        run: cargo test
+    uses: argyle-labs/.github/.github/workflows/plugin-ci.yml@main
+    secrets: inherit
