@@ -1,0 +1,4 @@
+# Vendored upstream API specs / schemas — data, not source. Exclude from
+# GitHub Linguist language stats so the repo reports as the Rust plugin it is.
+specs/** linguist-vendored
+specs/**/*.json linguist-generated
