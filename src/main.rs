@@ -6,4 +6,5 @@
 plugin_toolkit::serve_tool_plugin! {
     name: "plex",
     target_compat: "1.40-1.41",
+    link: plex,
 }
