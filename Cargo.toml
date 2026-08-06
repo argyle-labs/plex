@@ -36,7 +36,7 @@ path = "src/main.rs"
 # The committed `[patch]` in `.cargo/config.toml` overrides this to the local
 # in-tree toolkit for development; the git branch is what an external checkout
 # without the orca repo resolves against.
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main" }
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", tag = "v0.1.7-rc.1" }
 
 # serde / serde_json / thiserror: the toolkit's re-exported derives (`Serialize`,
 # `Deserialize`, `Error`) expand to bare `::serde` / `::thiserror` crate-root
