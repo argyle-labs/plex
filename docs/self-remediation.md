@@ -85,6 +85,7 @@ with the right remediation tier:
 | Condition | Detection | Remediation | Tier |
 |---|---|---|---|
 | Transcode temp dir near-full | statvfs the resolved `TranscoderTempDirectory` filesystem vs. a workload headroom threshold | remove **stale** session scratch (never a live `sessionKey`) | auto-apply (safe) |
+| Config/library disk full from BIF preview thumbnails | statvfs the filesystem holding `Library/.../Plex Media Server` vs. a headroom threshold; correlate to BIF bloat (`GenerateBIFBehavior="scheduled"` regenerating video-preview thumbnails into `.../Media/**/*.bif`) | purge regenerable cache only — BIF (`*.bif`), `Cache/PhotoTranscoder`, `Cache/Transcode` (never the SQLite databases, `Metadata`, or `Media` bundles' non-BIF contents) | auto-apply (safe) |
 | Orphaned/stuck transcoders | enumerate `Plex Transcoder` procs, correlate to live `sessionKey` via `-progressurl`; flag ones with no live session (don't trust process uptime in a rebuilt container) | kill orphans, reclaim their scratch | auto-apply (safe) |
 | Runtime RAM too small for the transcode profile (temp dir is a RAM-backed tmpfs capped below what N concurrent 4K sessions need) | temp fs is tmpfs AND its cap is a large fraction of runtime RAM AND saturation recurs | **`SuggestedAction` → `lifecycle.set_resources { memory: +N }`** on the plugin's own runtime unit | **confirm + admin** |
 | Direct-play delivery-bandwidth risk | session is `directplay`, high source bitrate, LAN client | advise client-side quality cap / wired client (no server action) | advisory only |
@@ -93,6 +94,34 @@ Note the tmpfs constraint the RAM-grow suggestion must respect: a RAM-backed
 temp dir counts against runtime RAM, so the suggested new tmpfs cap must stay
 comfortably below the (post-resize) runtime memory — the provider validates
 against host capacity before applying.
+
+### BIF preview-thumbnail fill (config disk, not transcode temp)
+
+Distinct from the transcode-temp case above: with
+`GenerateBIFBehavior="scheduled"`, Plex regenerates video-preview thumbnails
+(BIF index files) for the whole library into `Library/.../Media/**/*.bif`. On a
+runtime whose **config/library** volume is smaller than the library warrants,
+this fills the config disk to 100%. The observed consequence is not just failed
+transcodes — a config disk at 0 bytes free corrupts the SQLite databases
+(`DatabaseFixups`/`Unknown metadata type` in the log, crash-looping PMS) and
+breaks playback wholesale. On one media unit this was ~65 GB of BIF (6000+
+files) filling a 98 GB config disk.
+
+Detection is a statvfs of the config-volume filesystem; remediation is purging
+regenerable cache only (BIF, `Cache/PhotoTranscoder`, `Cache/Transcode`) — the
+databases, `Metadata`, and the non-BIF Media bundle contents are never touched.
+Because BIF is regenerable, this is a safe auto-apply tier. The durable options
+the plugin should surface as tiered suggestions are (a) grow the config volume
+(`lifecycle.set_resources { disk }`, confirm+admin) so BIF fits without churn,
+or (b) set `GenerateBIFBehavior="never"` to stop generation entirely (advisory
+— it drops scrubbing previews).
+
+Interim mitigation shipped at the host level ahead of this plugin work: an
+hourly `plex-cache-guard` systemd timer on the Proxmox hosts purges the same
+regenerable cache inside the container when the config disk crosses 85%. That
+guard is a stopgap; the detection + purge belongs in `plex.diagnose` as the
+"config disk near-full" row below, and the grow-disk path belongs in
+`lifecycle.set_resources` (disk grow) rather than a per-host timer.
 
 ## Build order
 
