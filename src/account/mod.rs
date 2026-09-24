@@ -76,7 +76,7 @@ pub async fn probe(token: String, threshold_secs: i64) -> Result<Vec<ServerPrese
 //                             that moment (during the incident orca's lxc adapter
 //                             on thor returned zero containers, and
 //                             thor/mimir.scottkey.me DNS both resolve to
-//                             baldur/caddy 10.10.10.6). Reach the guest directly.
+//                             baldur/caddy 10.0.0.6). Reach the guest directly.
 //   Tier 3  ▸ notify        — TODO. Escalate via orca's notify seam when tier 2
 //                             fails to restore a fresh announce.
 //   Watchdog ▸ in-CT timer  — TODO. Plugin-provisioned systemd timer / onboot
