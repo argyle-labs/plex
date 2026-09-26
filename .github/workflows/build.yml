@@ -58,6 +58,13 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           build-args: PLEX_VERSION=latest
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # A broken cache backend must not fail the publish. Gitea's actcache
+          # 500s with `open /root/.cache/actcache/bolt.db: no such file or
+          # directory`, and BuildKit cancels sibling exporters when one errors —
+          # so the image built for both arches, started pushing, then got
+          # CANCELED by the cache export. `ignore-error` keeps the cache as the
+          # pure optimization it is. The image itself is unaffected, which is why
+          # this is safe to soft-fail: nothing about the deliverable is hidden.
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
           platforms: linux/amd64,linux/arm64
