@@ -36,13 +36,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # `secrets.GITHUB_TOKEN` is the RUNNER's built-in token. These workflows run
+      # on Gitea runners, where that token is a *Gitea* token and can never
+      # authenticate to ghcr.io — so this step failed on every push to main since
+      # the workflow was written, and the push below was skipped. PR runs hid it:
+      # login and push are both gated off for pull_request, so they went green
+      # while never exercising the publish path. Use the org-level GH_TOKEN (a real
+      # GitHub PAT with write:packages) and the repo owner as the username.
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GH_TOKEN }}
 
       - name: Build and push latest
         uses: docker/build-push-action@v5
