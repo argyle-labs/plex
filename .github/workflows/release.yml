@@ -36,4 +36,3 @@ jobs:
       channel: ${{ inputs.channel }}
       bump: ${{ inputs.bump }}
       notes: ${{ inputs.notes }}
-      image_name: argyle-labs/plex
