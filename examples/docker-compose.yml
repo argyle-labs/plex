@@ -1,4 +1,4 @@
-# Plex Media Server — this repo's self-built image (ghcr.io/argyle-labs/plex).
+# Plex Media Server — this repo's self-built image (gitea.scottkey.me/argyle-labs/plex).
 #
 # ONE implementation. GPU and transcode-scratch are independent OPTIONS you mix
 # and match — not separate setups:
@@ -11,7 +11,7 @@
 
 services:
   plex:
-    image: ghcr.io/argyle-labs/plex:latest
+    image: gitea.scottkey.me/argyle-labs/plex:latest
     container_name: plex
     network_mode: host          # Plex serves on :32400 (http://<host>:32400/web)
     restart: unless-stopped

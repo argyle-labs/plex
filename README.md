@@ -25,7 +25,7 @@ can run Plex **without orca** on docker, podman, an LXC, a VM, or Unraid.
 
 ### Docker / Podman
 
-The image (`ghcr.io/argyle-labs/plex`, built from [`Dockerfile`](Dockerfile) on
+The image (`gitea.scottkey.me/argyle-labs/plex`, built from [`Dockerfile`](Dockerfile) on
 `debian:12-slim`) runs `network_mode: host` on **:32400**
 (`http://<host>:32400/web`).
 
@@ -47,13 +47,13 @@ mix and match (all shown inline as comments), not separate setups:
 - **Transcode scratch** — a disk path (default) **or** `tmpfs` (RAM),
   independent of the GPU choice.
 
-**Not tied to our image.** `ghcr.io/argyle-labs/plex` is a convenience build —
+**Not tied to our image.** `gitea.scottkey.me/argyle-labs/plex` is a convenience build —
 swap `image:` for any equivalent. [`examples/docker-compose.upstream.yml`](examples/docker-compose.upstream.yml)
 is the same deployment on the official image:
 
 | Image | Notes |
 |---|---|
-| `ghcr.io/argyle-labs/plex` | this repo's slim build (`Dockerfile`); Intel VAAPI ready |
+| `gitea.scottkey.me/argyle-labs/plex` | this repo's slim build (`Dockerfile`); Intel VAAPI ready |
 | `plexinc/pms-docker` | official upstream image (`latest` / `beta` / `public` tags) |
 | `lscr.io/linuxserver/plex` | LinuxServer.io build (uses `PUID`/`PGID`, `/config` layout) |
 
@@ -85,7 +85,7 @@ Install from **Community Applications** (the *Apps* tab) — search **Plex Media
 Server** and add the template; it wires up the web UI, `/config`, transcode, and
 media shares for you. Add `/dev/dri` (Settings → Docker, or the template's extra
 device) for Intel/AMD hardware transcoding. To use this repo's image instead, set
-the template's *Repository* to `ghcr.io/argyle-labs/plex`. (Manual fallback:
+the template's *Repository* to `gitea.scottkey.me/argyle-labs/plex`. (Manual fallback:
 *Docker → Add Container* with that image, port `32400`, `/config` + `/transcode`,
 media read-only.)
 
