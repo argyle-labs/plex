@@ -4,19 +4,18 @@
 //! deploy lifecycle of a Plex instance — provision, version bump, and config
 //! backup/restore — driving the host's container runtime (`pct` for Proxmox
 //! LXC, `docker` for Compose) and `tar` for the `/config` volume through
-//! `tokio::process::Command`. There is no parallel shell glue: the bootstrap
+//! `plugin_toolkit::process::Command`. There is no parallel shell glue: the bootstrap
 //! scripts in `scripts/` + `lxc/` are the curl-bootstrap payload these tools
 //! orchestrate, and every capability is reachable as an orca tool.
 //!
 //! Imports flow through `plugin_toolkit::prelude::*` only — the toolkit is the
-//! single gateway. Process exec uses the toolkit's re-exported `tokio`.
+//! single gateway. Process exec uses the toolkit's `process` module.
 #![allow(clippy::disallowed_types)]
 
 use std::path::Path;
-use std::process::Output;
 
 use plugin_toolkit::prelude::*;
-use tokio::process::Command;
+use plugin_toolkit::process::{Command, Output};
 
 /// Where a Plex instance is deployed — selects which runtime the lifecycle
 /// tools drive.
@@ -79,14 +78,21 @@ impl Channel {
 /// Run a command, capturing output, and map a non-zero exit to an error that
 /// carries stderr — the lifecycle tools surface the runtime's own message
 /// rather than a bare exit code.
-async fn run(cmd: &mut Command) -> Result<Output> {
+async fn run(cmd: Command) -> Result<Output> {
     let output = cmd
         .output()
         .await
         .with_context(|| "failed to spawn command".to_string())?;
-    if !output.status.success() {
+    if !output.status.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("command failed ({}): {}", output.status, stderr.trim());
+        bail!(
+            "command failed (exit {}): {}",
+            output
+                .status
+                .code
+                .map_or_else(|| "signal".to_string(), |c| c.to_string()),
+            stderr.trim()
+        );
     }
     Ok(output)
 }
@@ -166,29 +172,31 @@ async fn plex_install(args: PlexInstallArgs, _ctx: &ToolCtx) -> Result<PlexInsta
                 .bootstrap_path
                 .clone()
                 .unwrap_or_else(|| "lxc/provision.sh".to_string());
-            let mut cmd = Command::new("bash");
-            cmd.arg(&script).arg(vmid.to_string());
-            cmd.arg("--config").arg(&args.config_path);
+            let mut cmd = Command::new("bash")
+                .arg(&script)
+                .arg(vmid.to_string())
+                .arg("--config")
+                .arg(&args.config_path);
             if let Some(media) = &args.media_path {
-                cmd.arg("--media").arg(media);
+                cmd = cmd.arg("--media").arg(media);
             }
             if args.no_gpu {
-                cmd.arg("--no-gpu");
+                cmd = cmd.arg("--no-gpu");
             }
-            run(&mut cmd).await?
+            run(cmd).await?
         }
         Runtime::Docker => {
             let compose = args
                 .bootstrap_path
                 .clone()
                 .unwrap_or_else(|| "compose.yml".to_string());
-            let mut cmd = Command::new("docker");
-            cmd.arg("compose")
+            run(Command::new("docker")
+                .arg("compose")
                 .arg("-f")
                 .arg(&compose)
                 .arg("up")
-                .arg("-d");
-            run(&mut cmd).await?
+                .arg("-d"))
+            .await?
         }
     };
     Ok(PlexInstallOutput {
@@ -419,6 +427,8 @@ pub struct PlexBackupArgs {
 pub struct PlexBackupOutput {
     /// Absolute path of the archive written.
     pub archive: String,
+    /// Hex SHA-256 of the archive, also written to its `.sha256` sidecar.
+    pub sha256: String,
 }
 
 /// **Back up the Plex `/config` volume** to a `.tar.gz` in the destination
@@ -456,7 +466,8 @@ async fn backup_config(args: &PlexBackupArgs) -> Result<PlexBackupOutput> {
         .arg("."))
     .await?;
 
-    Ok(PlexBackupOutput { archive })
+    let sha256 = crate::archive::write_sidecar(&archive)?;
+    Ok(PlexBackupOutput { archive, sha256 })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -493,12 +504,14 @@ pub struct PlexRestoreArgs {
 pub struct PlexRestoreOutput {
     /// True when extraction completed.
     pub restored: bool,
+    /// Hex SHA-256 the archive was verified against.
+    pub verified_sha256: String,
     /// Where the config was restored to.
     pub config_path: String,
 }
 
 /// **Restore the Plex `/config` volume** from a `.tar.gz` produced by
-/// `plex.backup`. The service should be stopped before restoring; this tool
+/// `plex.backup`, after verifying it against its `.sha256` sidecar. The service should be stopped before restoring; this tool
 /// only extracts the archive over the config directory.
 #[orca_tool(domain = "plex", verb = "restore")]
 async fn plex_restore(args: PlexRestoreArgs, _ctx: &ToolCtx) -> Result<PlexRestoreOutput> {
@@ -510,15 +523,11 @@ async fn restore_config(args: PlexRestoreArgs) -> Result<PlexRestoreOutput> {
     if !Path::new(&args.from).is_file() {
         bail!("backup tarball '{}' not found", args.from);
     }
-    run(Command::new("mkdir").arg("-p").arg(&args.config_path)).await?;
-    run(Command::new("tar")
-        .arg("-xzf")
-        .arg(&args.from)
-        .arg("-C")
-        .arg(&args.config_path))
-    .await?;
+    let verified = crate::archive::verify(&args.from)?;
+    crate::archive::extract(&verified, &args.config_path).await?;
     Ok(PlexRestoreOutput {
         restored: true,
+        verified_sha256: verified.sha256.clone(),
         config_path: args.config_path,
     })
 }

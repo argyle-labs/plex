@@ -27,6 +27,7 @@
 #![allow(clippy::disallowed_types)]
 
 pub mod account;
+pub mod archive;
 pub mod diag;
 pub mod lifecycle;
 pub mod remediation;
