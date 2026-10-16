@@ -319,43 +319,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
-name = "containers"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "clap",
- "contract",
- "derive",
- "macro-runtime",
- "notifications",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "utils",
-]
-
-[[package]]
-name = "contract"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "async-trait",
- "dirs",
- "rust-embed",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "utils",
-]
-
-[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -532,34 +495,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "db"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "contract",
- "derive",
- "getrandom 0.3.4",
- "include_dir",
- "inventory",
- "macro-runtime",
- "moka",
- "mysql_async",
- "plugin-abi",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "tokio-postgres",
- "tracing",
- "utils",
-]
-
-[[package]]
 name = "deadpool"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -578,34 +513,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
-name = "deploy-target"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "async-trait",
- "plugin-abi",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-
-[[package]]
-name = "derive"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "derive_more"
@@ -671,22 +582,6 @@ dependencies = [
  "option-ext",
  "redox_users",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "dispatch"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "clap",
- "contract",
- "futures",
- "inventory",
- "schemars",
- "serde",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -939,22 +834,6 @@ dependencies = [
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "graphql"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "graphql-parser",
- "graphql_client",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "utils",
- "utoipa",
 ]
 
 [[package]]
@@ -1521,27 +1400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "macro-runtime"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "contract",
- "derive",
- "dispatch",
- "inventory",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "utils",
-]
-
-[[package]]
 name = "manyhow"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1581,19 +1439,6 @@ checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
 dependencies = [
  "cfg-if",
  "digest 0.11.3",
-]
-
-[[package]]
-name = "media"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "derive",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -1743,28 +1588,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "notifications"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "clap",
- "db",
- "derive",
- "lettre",
- "macro-runtime",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "toml",
- "tracing",
- "utils",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1866,21 +1689,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "openapi"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "indexmap",
- "oas3",
- "openapiv3",
- "reqwest",
- "serde",
- "serde_json",
- "utils",
-]
-
-[[package]]
 name = "openapiv3"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1924,6 +1732,328 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "orca-containers"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "clap",
+ "orca-contract",
+ "orca-derive",
+ "orca-macro-runtime",
+ "orca-notifications",
+ "orca-utils",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "orca-contract"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dirs",
+ "orca-derive",
+ "orca-utils",
+ "rust-embed",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "orca-db"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "getrandom 0.3.4",
+ "include_dir",
+ "inventory",
+ "moka",
+ "mysql_async",
+ "orca-contract",
+ "orca-derive",
+ "orca-macro-runtime",
+ "orca-plugin-abi",
+ "orca-utils",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
+name = "orca-deploy-target"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "async-trait",
+ "orca-plugin-abi",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "orca-derive"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "orca-dispatch"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "inventory",
+ "orca-contract",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "orca-graphql"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "graphql-parser",
+ "graphql_client",
+ "orca-utils",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "utoipa",
+]
+
+[[package]]
+name = "orca-macro-runtime"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "inventory",
+ "orca-contract",
+ "orca-derive",
+ "orca-dispatch",
+ "orca-utils",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "orca-media"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "orca-derive",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "orca-notifications"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lettre",
+ "orca-db",
+ "orca-derive",
+ "orca-macro-runtime",
+ "orca-utils",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "orca-openapi"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "oas3",
+ "openapiv3",
+ "orca-utils",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "orca-plugin-abi"
+version = "0.1.0"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "schemars",
+ "serde",
+]
+
+[[package]]
+name = "orca-plugin-proto"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "orca-plugin-toolkit"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "clap",
+ "futures-core",
+ "futures-util",
+ "graphql_client",
+ "http",
+ "inventory",
+ "orca-containers",
+ "orca-contract",
+ "orca-deploy-target",
+ "orca-derive",
+ "orca-dispatch",
+ "orca-graphql",
+ "orca-macro-runtime",
+ "orca-media",
+ "orca-notifications",
+ "orca-openapi",
+ "orca-plugin-abi",
+ "orca-plugin-proto",
+ "orca-service",
+ "orca-storage",
+ "orca-utils",
+ "progenitor-client",
+ "regress",
+ "reqwest",
+ "rustls",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "orca-service"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "orca-contract",
+ "orca-deploy-target",
+ "orca-derive",
+ "orca-utils",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "orca-storage"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "orca-derive",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "orca-utils"
+version = "0.2.1-rc.19"
+source = "git+https://github.com/argyle-labs/orca?branch=main#7cb801dcff4743153bc7f4fdfca1478a66f0b332"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "chrono",
+ "futures-util",
+ "orca-derive",
+ "rand 0.10.2",
+ "regex",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "url",
+ "urlencoding",
+ "uuid",
+]
 
 [[package]]
 name = "parking_lot"
@@ -2005,76 +2135,13 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 name = "plex"
 version = "0.1.0"
 dependencies = [
- "plugin-toolkit",
+ "orca-plugin-toolkit",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "wiremock",
-]
-
-[[package]]
-name = "plugin-abi"
-version = "0.1.0"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "schemars",
- "serde",
-]
-
-[[package]]
-name = "plugin-proto"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "plugin-toolkit"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "clap",
- "containers",
- "contract",
- "deploy-target",
- "derive",
- "dispatch",
- "futures-core",
- "futures-util",
- "graphql",
- "graphql_client",
- "http",
- "inventory",
- "macro-runtime",
- "media",
- "notifications",
- "openapi",
- "plugin-abi",
- "plugin-proto",
- "progenitor-client",
- "regress",
- "reqwest",
- "rustls",
- "schemars",
- "serde",
- "serde_json",
- "service",
- "storage",
- "thiserror 2.0.20",
- "tikv-jemalloc-ctl",
- "tikv-jemallocator",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "utils",
 ]
 
 [[package]]
@@ -2723,6 +2790,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2754,22 +2832,6 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
-]
-
-[[package]]
-name = "service"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "contract",
- "deploy-target",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "utils",
 ]
 
 [[package]]
@@ -2907,19 +2969,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "storage"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "derive",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
-]
 
 [[package]]
 name = "stringprep"
@@ -3494,38 +3543,6 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
-
-[[package]]
-name = "utils"
-version = "0.2.1-rc.11"
-source = "git+https://github.com/argyle-labs/orca?branch=main#d39db542d7eef61b6a852e135a55006759ba8047"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "blake3",
- "chrono",
- "futures-util",
- "rand 0.10.2",
- "regex",
- "reqwest",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.20",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "url",
- "urlencoding",
- "uuid",
-]
 
 [[package]]
 name = "utoipa"
