@@ -1,38 +1,86 @@
 name: Release
-
-# Thin caller: the whole release flow lives ONCE in the org reusable
-# argyle-labs/.github → .github/workflows/plugin-release.yml. This repo just
-# forwards the manual dispatch inputs. See that file for version math + artifact
-# staging (plugin binary + sha256, built against orca `main`).
-#   Actions → Release → Run workflow → channel (rc | stable) + bump.
+run-name: Release ${{ github.event.release.tag_name || inputs.version }}
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
-      channel:
-        description: "Release channel: rc (prerelease) or stable"
-        required: true
-        type: choice
-        options: [rc, stable]
-        default: rc
-      bump:
-        description: "Version bump from latest stable tag"
-        required: true
-        type: choice
-        options: [patch, minor, major]
-        default: patch
-      notes:
-        description: "Extra release notes (optional)"
-        required: false
+      version:
+        description: 'Already-published tag to rebuild: vX.Y.Z-rc.N or vX.Y.Z'
         type: string
+        required: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.repository }}-release-${{ github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.version }}
+  ORCA_FETCH_TOKEN: ${{ secrets.ORCA_FETCH_TOKEN }}
+  SCCACHE_ENDPOINT: ${{ vars.SCCACHE_ENDPOINT }}
+  SCCACHE_S3_ACCESS_KEY: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
+  SCCACHE_S3_SECRET_KEY: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
+
 jobs:
-  release:
-    uses: argyle-labs/.github/.github/workflows/plugin-release.yml@main
-    secrets: inherit
-    with:
-      channel: ${{ inputs.channel }}
-      bump: ${{ inputs.bump }}
-      notes: ${{ inputs.notes }}
+  build-x86_64-linux-gnu:
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    steps:
+      - uses: argyle-labs/.github/.github/actions/job-plugin-release-build@main
+        with:
+          target: x86_64-unknown-linux-gnu
+
+  build-x86_64-linux-musl:
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
+      credentials:
+        username: ${{ secrets.CI_REGISTRY_USER }}
+        password: ${{ secrets.CI_REGISTRY_TOKEN }}
+    steps:
+      - uses: argyle-labs/.github/.github/actions/job-plugin-release-build@main
+        with:
+          target: x86_64-unknown-linux-musl
+
+  build-aarch64-darwin:
+    runs-on: macos
+    steps:
+      - uses: argyle-labs/.github/.github/actions/job-plugin-release-build@main
+        with:
+          target: aarch64-apple-darwin
+
+  publish:
+    needs: [build-x86_64-linux-gnu, build-x86_64-linux-musl, build-aarch64-darwin]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: argyle-labs/.github/.github/actions/job-plugin-release-publish@main
+        with:
+          signing-key: ${{ secrets.PLUGIN_SIGNING_KEY }}
+          release-token: ${{ secrets.ORCA_RELEASE_TOKEN }}
+          registry: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}
+          registry-http: ${{ vars.CI_REGISTRY_HTTP || 'false' }}
+          registry-user: ${{ secrets.CI_REGISTRY_USER }}
+          registry-token: ${{ secrets.CI_REGISTRY_TOKEN }}
+          github-token: ${{ secrets.GH_TOKEN }}
+
+  stable-draft:
+    needs: publish
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.repository }}-stable
+      cancel-in-progress: true
+    steps:
+      - uses: argyle-labs/.github/.github/actions/job-release-stable-draft@main
+        with:
+          tag: ${{ env.TAG }}
+          release-token: ${{ secrets.ORCA_RELEASE_TOKEN }}

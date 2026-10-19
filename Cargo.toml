@@ -36,7 +36,7 @@ path = "src/main.rs"
 # The committed `[patch]` in `.cargo/config.toml` overrides this to the local
 # in-tree toolkit for development; the git branch is what an external checkout
 # without the orca repo resolves against.
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit" }
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http"] }
 
 # serde / serde_json / thiserror: the toolkit's re-exported derives (`Serialize`,
 # `Deserialize`, `Error`) expand to bare `::serde` / `::thiserror` crate-root
@@ -59,3 +59,10 @@ tempfile = "3"
 # too — the plugin must stay portable back into the orca workspace.
 [lints.clippy]
 let_underscore_must_use = "deny"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
