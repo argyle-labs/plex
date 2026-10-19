@@ -1,0 +1,20 @@
+name: Release draft
+run-name: Release draft RC · ${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.repository }}-rc-draft
+  cancel-in-progress: true
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Draft RC
+        uses: argyle-labs/.github/.github/actions/job-release-draft@main
+        with:
+          release-token: ${{ secrets.ORCA_RELEASE_TOKEN }}

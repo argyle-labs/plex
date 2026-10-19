@@ -61,21 +61,7 @@ jobs:
       - name: Lint
         uses: argyle-labs/.github/.github/actions/job-rust-lint@main
         with:
-          sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
-          sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
-          sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
-
-  lint-doctest:
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ vars.CI_REGISTRY || 'gitea.scottkey.me' }}/argyle-labs/ci-rust:1.95.0
-      credentials:
-        username: ${{ secrets.CI_REGISTRY_USER }}
-        password: ${{ secrets.CI_REGISTRY_TOKEN }}
-    steps:
-      - name: Doctests
-        uses: argyle-labs/.github/.github/actions/job-rust-doctest@main
-        with:
+          image-tag: '1.95.0'
           sccache-endpoint: ${{ vars.SCCACHE_ENDPOINT }}
           sccache-access-key: ${{ secrets.SCCACHE_S3_ACCESS_KEY }}
           sccache-secret-key: ${{ secrets.SCCACHE_S3_SECRET_KEY }}
