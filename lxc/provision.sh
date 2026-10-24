@@ -145,7 +145,7 @@ echo "[provision] Starting LXC ${VMID}..."
 sudo pct start "$VMID"
 
 echo "[provision] Waiting for network..."
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
     if sudo pct exec "$VMID" -- curl -fsSL --max-time 3 https://downloads.plex.tv > /dev/null 2>&1; then
         break
     fi
