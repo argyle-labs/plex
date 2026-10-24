@@ -99,6 +99,7 @@ curl -L https://downloads.plex.tv/plex-keys/PlexSign.v2.key \
   | gpg --yes --dearmor -o /usr/share/keyrings/plexmediaserver.v2.gpg
 echo "deb [signed-by=/usr/share/keyrings/plexmediaserver.v2.gpg] https://repo.plex.tv/deb/ public main" \
   > /etc/apt/sources.list.d/plex.list
+rm -f /etc/apt/sources.list.d/plexmediaserver.list /usr/share/keyrings/plex-archive-keyring.gpg
 apt-get update && apt-get install -y plexmediaserver
 apt-cache policy plexmediaserver   # should show https://repo.plex.tv/deb/ public/main
 ```

@@ -92,7 +92,7 @@ find_backup_dir() {
     elif [[ -d /backups ]]; then
         echo "/backups"
     else
-        echo "$(pwd)"
+        pwd
     fi
 }
 

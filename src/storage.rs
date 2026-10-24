@@ -247,7 +247,7 @@ pub fn classify(
 /// Base `pct exec <id> --` / `docker exec <id>` command the guest steps append
 /// their argv to. No shell: args are passed literally, so paths with spaces
 /// (the `Plex SQLite` binary, the DB) need no quoting.
-fn guest(runtime: Runtime, id: &str) -> Command {
+pub(crate) fn guest(runtime: Runtime, id: &str) -> Command {
     let mut cmd = match runtime {
         Runtime::Lxc => {
             let mut c = Command::new("pct");
@@ -265,7 +265,7 @@ fn guest(runtime: Runtime, id: &str) -> Command {
 }
 
 /// Run a guest command, returning stdout; a non-zero exit carries stderr.
-async fn capture(mut cmd: Command) -> Result<String> {
+pub(crate) async fn capture(mut cmd: Command) -> Result<String> {
     let out = cmd
         .output()
         .await

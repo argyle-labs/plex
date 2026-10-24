@@ -121,10 +121,12 @@ fi
 
 # Install Plex
 if [ "$PLEX_VERSION" = "latest" ]; then
-    curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key \
-        | gpg --dearmor -o /usr/share/keyrings/plex-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/plex-archive-keyring.gpg] https://downloads.plex.tv/repo/deb public main" \
-        > /etc/apt/sources.list.d/plexmediaserver.list
+    rm -f /etc/apt/sources.list.d/plexmediaserver.list /etc/apt/sources.list.d/plex.sources \
+        /usr/share/keyrings/plex-archive-keyring.gpg
+    curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.v2.key \
+        | gpg --batch --yes --dearmor -o /usr/share/keyrings/plexmediaserver.v2.gpg
+    echo "deb [signed-by=/usr/share/keyrings/plexmediaserver.v2.gpg] https://repo.plex.tv/deb/ public main" \
+        > /etc/apt/sources.list.d/plex.list
     apt-get update
     apt-get install -y --no-install-recommends plexmediaserver
 else
