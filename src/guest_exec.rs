@@ -105,8 +105,8 @@ db=$1
 "#;
 
 const SQL_SH: &str = r#"mode=$2 sql=$3
-if [ "$mode" = ro ]; then exec "/usr/lib/plexmediaserver/Plex SQLite" -safe -readonly "$db" "$sql"; fi
-exec "/usr/lib/plexmediaserver/Plex SQLite" -safe "$db" "$sql""#;
+if [ "$mode" = ro ]; then HOME=/nonexistent exec "/usr/lib/plexmediaserver/Plex SQLite" -init /dev/null -safe -readonly "$db" "$sql"; fi
+HOME=/nonexistent exec "/usr/lib/plexmediaserver/Plex SQLite" -init /dev/null -safe "$db" "$sql""#;
 
 const DB_BACKUP_SH: &str = r#"dest=$2
 umask 077
@@ -115,7 +115,7 @@ set -C
 { true > "$dest"; } 2>/dev/null || { echo "backup destination exists: $dest" >&2; exit 3; }
 set +C
 [ -f "$dest" ] && [ ! -L "$dest" ] || { echo "backup destination is not a regular file" >&2; exit 4; }
-"/usr/lib/plexmediaserver/Plex SQLite" "$db" ".backup '$dest'"
+HOME=/nonexistent "/usr/lib/plexmediaserver/Plex SQLite" -init /dev/null "$db" ".backup '$dest'"
 [ -s "$dest" ] && [ -f "$dest" ] && [ ! -L "$dest" ] || { echo "backup is empty or not a regular file" >&2; exit 4; }
 [ "$(stat -c %i -- "$db")" != "$(stat -c %i -- "$dest")" ] || { echo "backup is the source inode" >&2; exit 4; }
 printf '%s\n' "$dest""#;
@@ -1058,7 +1058,8 @@ mod tests {
         .unwrap();
         let s = &p.steps[0];
         assert_eq!(s.run_as, RunAs::Owner(DD.into()));
-        assert!(s.argv[2].contains("-safe -readonly"));
+        assert!(s.argv[2].contains("-init /dev/null -safe -readonly"));
+        assert!(s.argv[2].matches("HOME=/nonexistent exec").count() == 2);
         assert_eq!(
             s.argv[4],
             format!("{DD}/Plug-in Support/Databases/com.plexapp.plugins.library.db")
@@ -1185,7 +1186,7 @@ mod tests {
         let s = &p.steps[0];
         assert_eq!(s.run_as, RunAs::Owner(DD.into()));
         assert!(s.argv[2].contains("set -C"));
-        assert!(s.argv[2].contains(r#""$db" ".backup '$dest'""#));
+        assert!(s.argv[2].contains(r#"HOME=/nonexistent "/usr/lib/plexmediaserver/Plex SQLite" -init /dev/null "$db" ".backup '$dest'""#));
         assert!(!s.argv[2].contains("-safe \"$db\" \".backup"));
         assert!(s.argv[2].contains("single quote"));
         assert!(!s.argv[2].contains("cat --"));

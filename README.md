@@ -137,7 +137,7 @@ Requirements:
 
 - **Proxmox tag:** every Plex LXC must carry the Proxmox tag `plex` (apply it with `proxmox.guest.label.apply`).
   - **Unprivileged side:** the plex plugin checks the tag through the Proxmox API (`proxmox.guest.label.audit` over `tool.call`) before it calls `plugin-apply`.
-  - **Privileged side:** the root half runs with a cleared environment and has no capability channel, so it cannot make tool calls and cannot repeat the tag check. Instead it requires the guest to contain `/usr/lib/plexmediaserver/Plex Media Server`.
+  - **Privileged side:** the root half runs with a cleared environment and has no capability channel, so it cannot make tool calls and cannot repeat the tag check. Instead it requires the guest to contain `/usr/lib/plexmediaserver/Plex Media Server`. A direct admin `orca admin plugin-apply` call skips the Proxmox tag check; the root side is gated only by that marker and the closed op set.
 - **Plex user, never root:** ops that read or write the Plex data dir (SQL, DB backup, Codecs/Logs listing, log scan) run as the data dir's owner, and a root-owned data dir is refused.
 - **Guest tools:** the guest or container needs `runuser` and GNU coreutils (`realpath -e`, `mv -T`, `stat -c`). busybox images fail with a clear error.
 - **DB backup:** uses Plex SQLite's `.backup` for a consistent snapshot. SQLite safe mode blocks `.backup`, so this one fixed command runs without `-safe`, with a destination path built and validated in the plugin. All other SQL runs with `-safe`, plus `-readonly` for reads.

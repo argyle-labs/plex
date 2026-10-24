@@ -331,7 +331,9 @@ fn after_authorization(lb: &[u8], i: usize) -> bool {
     while j > 0 && lb[j - 1].is_ascii_whitespace() {
         j -= 1;
     }
-    lb[..j].ends_with(b"authorization:") || lb[..j].ends_with(b"authorization=")
+    [b"authorization:".as_slice(), b"authorization=".as_slice()]
+        .iter()
+        .any(|suf| j >= suf.len() && lb[j - suf.len()..j].eq_ignore_ascii_case(suf))
 }
 
 fn bearer_stop(b: u8) -> bool {
@@ -1534,6 +1536,13 @@ mod tests {
         let basic = scrub_tokens("Authorization: Basic dXNlcjpwYXNz rest");
         assert!(!basic.contains("dXNlcjpwYXNz") && basic.contains("rest"));
         assert!(scrub_tokens("a basic setup").contains("basic setup"));
+        for line in [
+            "AUTHORIZATION=Basic QUJD rest",
+            "AuThOrIzAtIoN: bAsIc QUJD rest",
+        ] {
+            let r = scrub_tokens(line);
+            assert!(!r.contains("QUJD") && r.ends_with(" rest"), "{r}");
+        }
         let mb = scrub_tokens("X-Plex-Token=héllo\u{FFFD}日本%26next=1 tail");
         assert!(!mb.contains("héllo") && !mb.contains('日') && mb.contains("%26next=1 tail"));
         let mb2 = scrub_tokens("token=\u{FFFD}\u{FFFD} /leak/ü€ GetResultFromNetwork?url=ünï x");
