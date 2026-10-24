@@ -288,12 +288,11 @@ pub(crate) fn guest_as(runtime: Runtime, id: &str, user: &str) -> Command {
 }
 
 /// Run a guest command, returning stdout; a non-zero exit carries stderr.
-pub(crate) async fn capture(mut cmd: Command) -> Result<String> {
-    let out = cmd
-        .output()
+pub(crate) async fn capture(cmd: Command) -> Result<String> {
+    let out = crate::guest_exec::output(cmd)
         .await
-        .context("failed to spawn guest command")?;
-    if !out.status.success() {
+        .context("failed to run guest command")?;
+    if !out.success {
         bail!(
             "guest command failed ({}): {}",
             out.status,

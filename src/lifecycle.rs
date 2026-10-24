@@ -12,8 +12,8 @@
 //! single gateway. Process exec uses the toolkit's re-exported `tokio`.
 #![allow(clippy::disallowed_types)]
 
+use crate::guest_exec::ExecOutput;
 use std::path::Path;
-use std::process::Output;
 
 use plugin_toolkit::prelude::*;
 use tokio::process::Command;
@@ -79,12 +79,9 @@ impl Channel {
 /// Run a command, capturing output, and map a non-zero exit to an error that
 /// carries stderr — the lifecycle tools surface the runtime's own message
 /// rather than a bare exit code.
-async fn run(cmd: &mut Command) -> Result<Output> {
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| "failed to spawn command".to_string())?;
-    if !output.status.success() {
+async fn run(cmd: &mut Command) -> Result<ExecOutput> {
+    let output = crate::guest_exec::output(std::mem::replace(cmd, Command::new("true"))).await?;
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("command failed ({}): {}", output.status, stderr.trim());
     }

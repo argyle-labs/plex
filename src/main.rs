@@ -11,6 +11,9 @@ use plex as _;
 use plugin_toolkit::plugin::Plugin;
 
 fn main() -> plugin_toolkit::anyhow::Result<()> {
+    if plugin_toolkit::privileged::requested() {
+        plex::guest_exec::privileged_ops().serve_stdin();
+    }
     Plugin::named("plex")
         .version(env!("CARGO_PKG_VERSION"))
         .tools(["plex."])
