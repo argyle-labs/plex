@@ -46,8 +46,9 @@ owner=$(stat -L -c %U -- "$dd")
 [ "$uid" != 0 ] || { echo "data_dir is owned by uid 0; refusing to act as root" >&2; exit 3; }
 bad() { echo "data_dir owner is not a usable user name" >&2; exit 3; }
 [ -n "$owner" ] && [ "$owner" != UNKNOWN ] || bad
-case "$owner" in -*) bad ;; esac
-[ -z "$(printf '%s' "$owner" | tr -d 'A-Za-z0-9_-')" ] || bad
+case "$owner" in -*|.*) bad ;; esac
+[ -z "$(printf '%s' "$owner" | tr -d 'A-Za-z0-9._-')" ] || bad
+[ "$(id -u -- "$owner")" = "$uid" ] || { echo "data_dir owner name does not map back to its uid" >&2; exit 3; }
 "#;
 
 const RUN_AS_OWNER_TAIL: &str = r#"exec runuser -u "$owner" -- "$@""#;
@@ -109,13 +110,23 @@ exec "/usr/lib/plexmediaserver/Plex SQLite" -safe "$db" "$sql""#;
 
 const DB_BACKUP_SH: &str = r#"dest=$2
 umask 077
-set -C
-{ true > "$dest"; } 2>/dev/null || { echo "backup destination exists" >&2; exit 3; }
-set +C
-[ -f "$dest" ] && [ ! -L "$dest" ] || { echo "backup destination is not a regular file" >&2; exit 4; }
-cat -- "$db" >> "$dest"
-[ "$(stat -c %s -- "$db")" = "$(stat -c %s -- "$dest")" ] || { echo "backup size mismatch" >&2; exit 4; }
-[ "$(stat -c %i -- "$db")" != "$(stat -c %i -- "$dest")" ] || { echo "backup is the source inode" >&2; exit 4; }
+copy() {
+  src=$1 out=$2
+  [ ! -L "$src" ] || { echo "symlinked backup source: $src" >&2; exit 3; }
+  set -C
+  { true > "$out"; } 2>/dev/null || { echo "backup destination exists: $out" >&2; exit 3; }
+  set +C
+  [ -f "$out" ] && [ ! -L "$out" ] || { echo "backup destination is not a regular file: $out" >&2; exit 4; }
+  before=$(stat -c %s -- "$src")
+  cat -- "$src" >> "$out"
+  [ "$(stat -c %s -- "$src")" = "$before" ] || { echo "source changed during backup: $src" >&2; exit 4; }
+  [ "$(stat -c %s -- "$out")" = "$before" ] || { echo "backup size mismatch: $out" >&2; exit 4; }
+  [ "$(stat -c %i -- "$src")" != "$(stat -c %i -- "$out")" ] || { echo "backup is the source inode: $out" >&2; exit 4; }
+}
+copy "$db" "$dest"
+for sfx in -wal -shm; do
+  if [ -e "$db$sfx" ] || [ -L "$db$sfx" ]; then copy "$db$sfx" "$dest$sfx"; fi
+done
 printf '%s\n' "$dest""#;
 
 fn owner_script(tail: &str) -> String {
@@ -193,6 +204,7 @@ pub enum SqlQuery {
     OffendingParts { roots: Vec<String> },
     OffendingStreams { roots: Vec<String> },
     RewriteRoot { from_root: String, to_root: String },
+    CountParts { root: String },
 }
 
 impl SqlQuery {
@@ -218,6 +230,13 @@ impl SqlQuery {
                 format!(
                     "SELECT DISTINCT url FROM media_streams WHERE substr(url,1,8) = 'file:///' AND {} LIMIT 100;",
                     not_under_clause("url", roots, "file://")
+                )
+            }
+            Self::CountParts { root } => {
+                need(valid_rewrite_root(root), "root")?;
+                let p = format!("{}/", root.replace('\'', "''"));
+                format!(
+                    "SELECT count(*) FROM media_parts WHERE substr(file,1,length('{p}')) = '{p}';"
                 )
             }
             Self::RewriteRoot { from_root, to_root } => {
@@ -369,7 +388,21 @@ fn valid_roots(roots: &[String]) -> bool {
     !roots.is_empty() && roots.len() <= MAX_ROOTS && roots.iter().all(|r| valid_root(r))
 }
 
-pub fn check_rewrite(to_root: &str, library_roots: &[String], mounts: &[String]) -> Result<()> {
+pub fn check_rewrite(
+    from_root: &str,
+    to_root: &str,
+    library_roots: &[String],
+    mounts: &[String],
+) -> Result<()> {
+    if under(from_root, to_root) || under(to_root, from_root) {
+        bail!("from_root {from_root:?} and to_root {to_root:?} overlap");
+    }
+    if library_roots
+        .iter()
+        .any(|r| under(r, from_root) || under(from_root, r))
+    {
+        bail!("from_root {from_root:?} overlaps a current library root");
+    }
     if !library_roots.iter().any(|r| under(r, to_root)) {
         bail!("to_root {to_root:?} is not a parent of any current library root");
     }
@@ -412,24 +445,56 @@ pub fn valid_quarantine_dest(stamp: &str, dest: &str) -> bool {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LabelAudit {
+    #[serde(default)]
     pub guests: Vec<LabelRow>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum TagsField {
+    List(Vec<String>),
+    Joined(String),
+}
+
+fn de_tags<'de, D: plugin_toolkit::serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<String>, D::Error> {
+    Ok(match Option::<TagsField>::deserialize(d)? {
+        Some(TagsField::List(v)) => v,
+        Some(TagsField::Joined(s)) => s
+            .split([';', ',', ' '])
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct LabelRow {
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
     pub kind: String,
+    #[serde(default)]
     pub vmid: u64,
+    #[serde(default, deserialize_with = "de_tags")]
     pub tags: Vec<String>,
 }
 
-pub fn check_plex_tag(audit: &LabelAudit, vmid: u32) -> Result<()> {
+pub fn check_plex_tag(audit: &LabelAudit, vmid: u32, node: &str) -> Result<()> {
     let rows: Vec<&LabelRow> = audit
         .guests
         .iter()
-        .filter(|g| g.kind.eq_ignore_ascii_case("lxc") && g.vmid == u64::from(vmid))
+        .filter(|g| {
+            g.kind.eq_ignore_ascii_case("lxc")
+                && g.vmid == u64::from(vmid)
+                && g.node.eq_ignore_ascii_case(node)
+        })
         .collect();
     if rows.is_empty() {
-        bail!("Proxmox reports no LXC {vmid}");
+        bail!("Proxmox reports no LXC {vmid} on node {node:?}");
     }
     if !rows
         .iter()
@@ -438,6 +503,15 @@ pub fn check_plex_tag(audit: &LabelAudit, vmid: u32) -> Result<()> {
         bail!("LXC {vmid} is not tagged `{PLEX_TAG}` in Proxmox");
     }
     Ok(())
+}
+
+fn local_node() -> Result<String> {
+    ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .map(|h| h.trim().split('.').next().unwrap_or("").to_string())
+        .filter(|h| !h.is_empty())
+        .context("cannot determine the local Proxmox node name")
 }
 
 async fn require_plex_tag(vmid: u32) -> Result<()> {
@@ -452,7 +526,7 @@ async fn require_plex_tag(vmid: u32) -> Result<()> {
     .context("proxmox.guest.label.audit")?;
     let audit: LabelAudit =
         plugin_toolkit::serde_json::from_value(audit).context("decode proxmox label audit")?;
-    check_plex_tag(&audit, vmid)
+    check_plex_tag(&audit, vmid, &local_node()?)
 }
 
 fn need(ok: bool, what: &str) -> Result<()> {
@@ -614,10 +688,8 @@ impl GuestOp {
                 need(safe_codec_path(data_dir, src), "source path")?;
                 need(valid_quarantine_dest(stamp, dest), "quarantine path")?;
                 let codecs = format!("{}/Codecs", data_dir.trim_end_matches('/'));
-                plan(vec![
-                    root_sh(&owner_script(LAYOUT_TAIL), &[data_dir]),
-                    root_sh(QUARANTINE_SH, &[src, dest, &codecs]),
-                ])
+                let script = owner_script(&format!("{LAYOUT_TAIL}\n{QUARANTINE_SH}"));
+                plan(vec![root_sh(&script, &[data_dir, src, dest, &codecs])])
             }
             Self::KillTranscoders { data_dir } => {
                 need(valid_data_dir(data_dir), "data_dir")?;
@@ -658,7 +730,7 @@ impl ExecOutput {
             bail!(
                 "{what} failed ({}): {}",
                 self.status,
-                String::from_utf8_lossy(&self.stderr).trim()
+                scrub_tokens(String::from_utf8_lossy(&self.stderr).trim())
             );
         }
         Ok(self.stdout_string())
@@ -731,14 +803,20 @@ fn lines(out: &str) -> Vec<String> {
         .collect()
 }
 
-async fn preflight_rewrite(guest: &Guest, data_dir: &str, db: PlexDb, to_root: &str) -> Result<()> {
-    let roots_op = GuestOp::Sql {
+async fn preflight_rewrite(
+    guest: &Guest,
+    data_dir: &str,
+    db: PlexDb,
+    from_root: &str,
+    to_root: &str,
+) -> Result<()> {
+    let query = |query| GuestOp::Sql {
         data_dir: data_dir.to_string(),
         db,
-        query: SqlQuery::LibraryRoots,
+        query,
     };
     let roots = lines(
-        &run_steps(guest, &roots_op.plan()?.steps)
+        &run_steps(guest, &query(SqlQuery::LibraryRoots).plan()?.steps)
             .await?
             .checked("read library roots")?,
     );
@@ -747,7 +825,20 @@ async fn preflight_rewrite(guest: &Guest, data_dir: &str, db: PlexDb, to_root: &
             .await?
             .checked("findmnt")?,
     );
-    check_rewrite(to_root, &roots, &mounts)?;
+    check_rewrite(from_root, to_root, &roots, &mounts)?;
+    let count = run_steps(
+        guest,
+        &query(SqlQuery::CountParts {
+            root: from_root.to_string(),
+        })
+        .plan()?
+        .steps,
+    )
+    .await?
+    .checked("count items under from_root")?;
+    if count.trim().parse::<u64>().unwrap_or(0) == 0 {
+        bail!("no media_parts rows under from_root {from_root:?}");
+    }
     let is_dir = Step {
         run_as: RunAs::Owner(data_dir.to_string()),
         argv: vec!["test".into(), "-d".into(), to_root.to_string()],
@@ -763,10 +854,10 @@ async fn run_plan(guest: &Guest, op: &GuestOp) -> Result<ExecOutput> {
     if let GuestOp::Sql {
         data_dir,
         db,
-        query: SqlQuery::RewriteRoot { to_root, .. },
+        query: SqlQuery::RewriteRoot { from_root, to_root },
     } = op
     {
-        preflight_rewrite(guest, data_dir, *db, to_root).await?;
+        preflight_rewrite(guest, data_dir, *db, from_root, to_root).await?;
     }
     Ok(scrub_reply(op, run_steps(guest, &plan.steps).await?))
 }
@@ -793,7 +884,12 @@ pub(crate) async fn exec(guest: &Guest, op: GuestOp) -> Result<ExecOutput> {
             let req = GuestRequest { vmid: *vmid, op };
             let detail = privileged::apply(PLUGIN, name, Some(&req))
                 .await
-                .with_context(|| format!("{PLUGIN} {name} through `orca admin plugin-apply`"))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "{PLUGIN} {name} through `orca admin plugin-apply`: {}",
+                        scrub_tokens(&format!("{e:#}"))
+                    )
+                })?;
             plugin_toolkit::serde_json::from_str(&detail)
                 .with_context(|| format!("decode the {name} privileged reply"))
         }
@@ -1053,10 +1149,31 @@ mod tests {
     fn rewrite_target_must_back_a_library_root_on_a_live_mount() {
         let roots = vec!["/mnt/data/media/movies".to_string()];
         let mounts = vec!["/".to_string(), "/mnt/data".to_string()];
-        assert!(check_rewrite("/mnt/data/media", &roots, &mounts).is_ok());
-        assert!(check_rewrite("/srv/other", &roots, &mounts).is_err());
-        assert!(check_rewrite("/mnt/data/media", &roots, &["/".to_string()]).is_err());
-        assert!(check_rewrite("/mnt/data/med", &roots, &mounts).is_err());
+        assert!(check_rewrite("/data", "/mnt/data/media", &roots, &mounts).is_ok());
+        assert!(check_rewrite("/data", "/srv/other", &roots, &mounts).is_err());
+        assert!(check_rewrite("/data", "/mnt/data/media", &roots, &["/".to_string()]).is_err());
+        assert!(check_rewrite("/data", "/mnt/data/med", &roots, &mounts).is_err());
+        assert!(
+            check_rewrite("/mnt/data/media/movies", "/mnt/data/media", &roots, &mounts).is_err()
+        );
+        assert!(check_rewrite(
+            "/mnt/data/media/movies/x",
+            "/mnt/data/media",
+            &roots,
+            &mounts
+        )
+        .is_err());
+        assert!(check_rewrite("/mnt", "/mnt/data/media", &roots, &mounts).is_err());
+        assert!(check_rewrite("/mnt/data/media/old", "/mnt/data/media", &roots, &mounts).is_err());
+        let count = SqlQuery::CountParts {
+            root: "/data".into(),
+        }
+        .statement()
+        .unwrap();
+        assert!(count.contains("substr(file,1,length('/data/')) = '/data/'"));
+        assert!(SqlQuery::CountParts { root: "/".into() }
+            .statement()
+            .is_err());
     }
 
     #[test]
@@ -1077,8 +1194,9 @@ mod tests {
         let s = &p.steps[0];
         assert_eq!(s.run_as, RunAs::Owner(DD.into()));
         assert!(s.argv[2].contains("set -C"));
-        assert!(s.argv[2].contains("stat -c %s"));
+        assert!(s.argv[2].contains("source changed during backup"));
         assert!(s.argv[2].contains("stat -c %i"));
+        assert!(s.argv[2].contains("for sfx in -wal -shm"));
         assert!(!s.argv[2].contains("cp "));
         assert!(s.argv[5].starts_with(&format!("{}.orca-bak-", s.argv[4])));
     }
@@ -1154,16 +1272,21 @@ mod tests {
             dest,
         };
         let p = q(src.clone(), dest.clone()).plan().unwrap();
-        assert_eq!(p.steps.len(), 2);
-        assert!(p.steps.iter().all(|s| s.run_as == RunAs::Root));
+        assert_eq!(p.steps.len(), 1);
+        assert_eq!(p.steps[0].run_as, RunAs::Root);
         assert!(p.steps[0].argv[2].contains("uid 0; refusing"));
         assert!(p.steps[0].argv[2].contains("Plug-in Support/Databases"));
-        assert_eq!(p.steps[1].argv[2], QUARANTINE_SH);
+        assert!(p.steps[0].argv[2].ends_with(QUARANTINE_SH));
         assert_eq!(
-            p.steps[1].argv[4..],
-            [src.clone(), dest.clone(), format!("{DD}/Codecs")]
+            p.steps[0].argv[4..],
+            [
+                DD.to_string(),
+                src.clone(),
+                dest.clone(),
+                format!("{DD}/Codecs")
+            ]
         );
-        let c = command_for(&Guest::Lxc(7), &p.steps[1]);
+        let c = command_for(&Guest::Lxc(7), &p.steps[0]);
         assert!(!argv(&c).iter().any(|a| a.contains("runuser")));
         assert!(q("/etc/passwd".into(), dest.clone()).plan().is_err());
         assert!(q(src.clone(), "/tmp/x.quarantined".into()).plan().is_err());
@@ -1237,17 +1360,38 @@ mod tests {
         let audit: LabelAudit =
             plugin_toolkit::serde_json::from_value(plugin_toolkit::serde_json::json!({ "guests": [
                 { "kind": "lxc", "vmid": 110, "tags": ["media", "plex"], "node": "thor" },
-                { "kind": "lxc", "vmid": 115, "tags": ["media"] },
-                { "kind": "qemu", "vmid": 120, "tags": ["plex"] },
-                { "kind": "lxc", "vmid": 130, "tags": ["plex"] },
-                { "kind": "lxc", "vmid": 130, "tags": ["other"] }
+                { "kind": "lxc", "vmid": 115, "tags": "media;plex", "node": "frigg" },
+                { "kind": "lxc", "vmid": 116, "tags": ["media"], "node": "frigg" },
+                { "kind": "qemu", "vmid": 120, "tags": ["plex"], "node": "thor" },
+                { "kind": "lxc", "vmid": 130, "tags": ["plex"], "node": "thor" },
+                { "kind": "lxc", "vmid": 130, "tags": ["other"], "node": "thor" },
+                { "kind": "lxc", "vmid": 140, "node": "thor" }
             ]}))
             .unwrap();
-        assert!(check_plex_tag(&audit, 110).is_ok());
-        assert!(check_plex_tag(&audit, 115).is_err());
-        assert!(check_plex_tag(&audit, 120).is_err());
-        assert!(check_plex_tag(&audit, 130).is_err());
-        assert!(check_plex_tag(&audit, 999).is_err());
+        assert!(check_plex_tag(&audit, 110, "thor").is_ok());
+        assert!(check_plex_tag(&audit, 110, "frigg").is_err());
+        assert!(check_plex_tag(&audit, 115, "frigg").is_ok());
+        assert!(check_plex_tag(&audit, 116, "frigg").is_err());
+        assert!(check_plex_tag(&audit, 120, "thor").is_err());
+        assert!(check_plex_tag(&audit, 130, "thor").is_err());
+        assert!(check_plex_tag(&audit, 140, "thor").is_err());
+        assert!(check_plex_tag(&audit, 999, "thor").is_err());
+        let empty: LabelAudit =
+            plugin_toolkit::serde_json::from_value(plugin_toolkit::serde_json::json!({})).unwrap();
+        assert!(check_plex_tag(&empty, 110, "thor").is_err());
+    }
+
+    #[test]
+    fn checked_errors_are_scrubbed() {
+        let out = ExecOutput {
+            success: false,
+            code: Some(1),
+            status: "exit status: 1".into(),
+            stdout: Vec::new(),
+            stderr: b"failed X-Plex-Token=SECRET789".to_vec(),
+        };
+        let err = out.checked("op").unwrap_err().to_string();
+        assert!(!err.contains("SECRET789"));
     }
 
     #[test]

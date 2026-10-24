@@ -291,10 +291,24 @@ fn segment_stop(b: u8) -> bool {
 }
 
 fn param_stop(b: u8) -> bool {
-    matches!(
-        b,
-        b'&' | b' ' | b'"' | b'\'' | b'#' | b']' | b',' | b';' | b'%'
-    )
+    matches!(b, b'&' | b' ' | b'"' | b'\'' | b'#' | b']' | b',' | b';')
+}
+
+fn redact_param(out: &mut String, s: &str, start: usize) -> usize {
+    let bytes = s.as_bytes();
+    let lower = s.to_ascii_lowercase();
+    let mut end = start;
+    while end < bytes.len() && !param_stop(bytes[end]) && !lower[end..].starts_with("%26") {
+        end += 1;
+    }
+    if end > start {
+        out.push_str("***");
+    }
+    end
+}
+
+fn bearer_stop(b: u8) -> bool {
+    b.is_ascii_whitespace() || matches!(b, b'&' | b'"' | b'\'' | b',' | b';')
 }
 
 fn ident_byte(b: u8) -> bool {
@@ -318,6 +332,21 @@ pub fn scrub_tokens(line: &str) -> String {
         if rest.starts_with("/leak/") {
             out.push_str(&s[i..i + 6]);
             i = redact_value(&mut out, &s, i + 6, segment_stop);
+            continue;
+        }
+        if (rest.starts_with("bearer ") || rest.starts_with("bearer="))
+            && (i == 0 || !ident_byte(bytes[i - 1]))
+        {
+            let mut v = i + "bearer".len() + 1;
+            while v < bytes.len() && bytes[v] == b' ' {
+                v += 1;
+            }
+            out.push_str(&s[i..v]);
+            if s[v..].starts_with("***") {
+                i = v;
+            } else {
+                i = redact_value(&mut out, &s, v, bearer_stop);
+            }
             continue;
         }
         if rest.starts_with("tkn_") && (i == 0 || !ident_byte(bytes[i - 1])) {
@@ -347,7 +376,7 @@ pub fn scrub_tokens(line: &str) -> String {
                 if s[v..].starts_with("***") {
                     i = v;
                 } else {
-                    i = redact_value(&mut out, &s, v, param_stop);
+                    i = redact_param(&mut out, &s, v);
                 }
                 continue;
             }
@@ -697,9 +726,9 @@ async fn scan_logs(guest: &Guest, data_dir: &str) -> Result<Option<LogScan>> {
 }
 
 pub(crate) fn valid_user(u: &str) -> bool {
-    !u.is_empty()
+    u.bytes().next().is_some_and(|b| b != b'-' && b != b'.')
         && u.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
 pub fn parse_owner(out: &str) -> Result<String> {
@@ -1461,6 +1490,12 @@ mod tests {
         assert!(!l.contains("SECRETID") && l.contains("/more"));
         let e = scrub_tokens("GET /x?X-Plex-Token%3DENCODED999%26b=2 tail");
         assert!(!e.contains("ENCODED999") && e.contains("tail"));
+        let pct = scrub_tokens("token=ab%2Fcd%3Def%26next=1");
+        assert!(!pct.contains("cd") && !pct.contains("ef") && pct.contains("%26next=1"));
+        let h = scrub_tokens("Authorization: Bearer eyJhbGciOi.payload.sig rest");
+        assert!(!h.contains("eyJhbGciOi") && h.contains("rest"));
+        let q = scrub_tokens("x?bearer=ZZZ999&y=1");
+        assert!(!q.contains("ZZZ999") && q.contains("&y=1"));
         let t = scrub_tokens("name TKN_abc123 tail");
         assert!(!t.contains("abc123") && t.contains("tail"));
     }
