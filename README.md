@@ -127,6 +127,22 @@ surface**, identical across **CLI, MCP, and REST** (generated from one
 orca plex transcode_health --endpoint media   # is hardware transcode actually engaging?
 ```
 
+## Guest operations and privileges
+
+Commands inside a Plex guest go through a closed set of named ops, never a raw shell:
+- **LXC:** each op runs through orca's `plugin-apply` privileged seam. orca never holds root itself.
+- **Docker:** each op runs as `docker exec`.
+
+Requirements:
+
+- **Proxmox tag:** every Plex LXC must carry the Proxmox tag `plex` (apply it with `proxmox.guest.label.apply`).
+  - **Unprivileged side:** the plex plugin checks the tag through the Proxmox API (`proxmox.guest.label.audit` over `tool.call`) before it calls `plugin-apply`.
+  - **Privileged side:** the root half runs with a cleared environment and has no capability channel, so it cannot make tool calls and cannot repeat the tag check. Instead it requires the guest to contain `/usr/lib/plexmediaserver/Plex Media Server`.
+- **Plex user, never root:** ops that read or write the Plex data dir (SQL, DB backup, Codecs/Logs listing, log scan) run as the data dir's owner, and a root-owned data dir is refused.
+- **Guest tools:** the guest or container needs `runuser` and GNU coreutils (`realpath -e`, `mv -T`, `stat -c`). busybox images fail with a clear error.
+- **DB backup:** uses Plex SQLite's `.backup` for a consistent snapshot. SQLite safe mode blocks `.backup`, so this one fixed command runs without `-safe`, with a destination path built and validated in the plugin. All other SQL runs with `-safe`, plus `-readonly` for reads.
+- **Quarantine:** quarantined Codecs files go to a root-owned 0700 directory under `/var/lib/orca-quarantine/plex` inside the guest. In a container that directory is in the writable layer, so it is lost when the container is recreated.
+
 ## Layout
 
 - `src/` — the orca plugin (the `plex.*` tools above; typed upstream client via `progenitor`).

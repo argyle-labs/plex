@@ -110,23 +110,14 @@ exec "/usr/lib/plexmediaserver/Plex SQLite" -safe "$db" "$sql""#;
 
 const DB_BACKUP_SH: &str = r#"dest=$2
 umask 077
-copy() {
-  src=$1 out=$2
-  [ ! -L "$src" ] || { echo "symlinked backup source: $src" >&2; exit 3; }
-  set -C
-  { true > "$out"; } 2>/dev/null || { echo "backup destination exists: $out" >&2; exit 3; }
-  set +C
-  [ -f "$out" ] && [ ! -L "$out" ] || { echo "backup destination is not a regular file: $out" >&2; exit 4; }
-  before=$(stat -c %s -- "$src")
-  cat -- "$src" >> "$out"
-  [ "$(stat -c %s -- "$src")" = "$before" ] || { echo "source changed during backup: $src" >&2; exit 4; }
-  [ "$(stat -c %s -- "$out")" = "$before" ] || { echo "backup size mismatch: $out" >&2; exit 4; }
-  [ "$(stat -c %i -- "$src")" != "$(stat -c %i -- "$out")" ] || { echo "backup is the source inode: $out" >&2; exit 4; }
-}
-copy "$db" "$dest"
-for sfx in -wal -shm; do
-  if [ -e "$db$sfx" ] || [ -L "$db$sfx" ]; then copy "$db$sfx" "$dest$sfx"; fi
-done
+case "$dest" in *"'"*) echo "backup path contains a single quote" >&2; exit 3 ;; esac
+set -C
+{ true > "$dest"; } 2>/dev/null || { echo "backup destination exists: $dest" >&2; exit 3; }
+set +C
+[ -f "$dest" ] && [ ! -L "$dest" ] || { echo "backup destination is not a regular file" >&2; exit 4; }
+"/usr/lib/plexmediaserver/Plex SQLite" "$db" ".backup '$dest'"
+[ -s "$dest" ] && [ -f "$dest" ] && [ ! -L "$dest" ] || { echo "backup is empty or not a regular file" >&2; exit 4; }
+[ "$(stat -c %i -- "$db")" != "$(stat -c %i -- "$dest")" ] || { echo "backup is the source inode" >&2; exit 4; }
 printf '%s\n' "$dest""#;
 
 fn owner_script(tail: &str) -> String {
@@ -1194,9 +1185,10 @@ mod tests {
         let s = &p.steps[0];
         assert_eq!(s.run_as, RunAs::Owner(DD.into()));
         assert!(s.argv[2].contains("set -C"));
-        assert!(s.argv[2].contains("source changed during backup"));
-        assert!(s.argv[2].contains("stat -c %i"));
-        assert!(s.argv[2].contains("for sfx in -wal -shm"));
+        assert!(s.argv[2].contains(r#""$db" ".backup '$dest'""#));
+        assert!(!s.argv[2].contains("-safe \"$db\" \".backup"));
+        assert!(s.argv[2].contains("single quote"));
+        assert!(!s.argv[2].contains("cat --"));
         assert!(!s.argv[2].contains("cp "));
         assert!(s.argv[5].starts_with(&format!("{}.orca-bak-", s.argv[4])));
     }
@@ -1434,7 +1426,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn db_backup_script_refuses_existing_dest_and_copies_exactly() {
+    fn db_backup_script_refuses_unsafe_destinations() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         let db = root.join("a.db");
@@ -1450,14 +1442,15 @@ mod tests {
                 .output()
                 .unwrap()
         };
-        let dest = root.join("a.db.bak");
-        assert!(run(&dest).status.success());
-        assert_eq!(std::fs::read(&dest).unwrap(), b"sqlite-bytes");
-        assert!(!run(&dest).status.success());
+        let existing = root.join("a.db.bak");
+        std::fs::write(&existing, b"old").unwrap();
+        assert_eq!(run(&existing).status.code(), Some(3));
+        assert_eq!(std::fs::read(&existing).unwrap(), b"old");
         let link = root.join("link.bak");
         std::os::unix::fs::symlink(root.join("victim"), &link).unwrap();
-        assert!(!run(&link).status.success());
+        assert_eq!(run(&link).status.code(), Some(3));
         assert!(!root.join("victim").exists());
+        assert_eq!(run(&root.join("it's.bak")).status.code(), Some(3));
     }
 
     #[cfg(target_os = "linux")]
