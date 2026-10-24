@@ -327,6 +327,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_pref_encodes_value() {
+        use wiremock::matchers::query_param;
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/:/prefs"))
+            .and(query_param("TranscoderH264Options", "a&b=c%d e"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Client::new(Config::new(server.uri(), "tok"))
+            .set_pref("TranscoderH264Options", "a&b=c%d e")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn libraries_parses() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
