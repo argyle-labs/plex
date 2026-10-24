@@ -31,6 +31,7 @@ pub mod apt_repo;
 pub mod diag;
 pub mod lifecycle;
 pub mod remediation;
+pub mod security;
 pub mod storage;
 pub mod tools;
 
@@ -143,6 +144,28 @@ struct RawLocation {
     path: Option<String>,
 }
 
+#[derive(Debug, Clone, plugin_toolkit::serde::Deserialize)]
+#[serde(crate = "plugin_toolkit::serde")]
+struct PrefsEnvelope {
+    #[serde(rename = "MediaContainer", default)]
+    media_container: Option<PrefsContainer>,
+}
+
+#[derive(Debug, Clone, Default, plugin_toolkit::serde::Deserialize)]
+#[serde(crate = "plugin_toolkit::serde")]
+struct PrefsContainer {
+    #[serde(rename = "Setting", default)]
+    setting: Vec<RawSetting>,
+}
+
+#[derive(Debug, Clone, plugin_toolkit::serde::Deserialize)]
+#[serde(crate = "plugin_toolkit::serde")]
+struct RawSetting {
+    id: String,
+    #[serde(default)]
+    value: plugin_toolkit::serde_json::Value,
+}
+
 /// Hand-written transport. Carries the Plex token on every request as the
 /// `X-Plex-Token` header and asks for JSON via `Accept: application/json`.
 #[derive(Clone)]
@@ -220,6 +243,43 @@ impl Client {
     /// outside the guest. Errors (timeout, connection refused) propagate.
     pub async fn liveness(&self) -> Result<u16, PlexError> {
         Ok(self.authed_get("/identity").await?.status)
+    }
+
+    pub async fn identity_version(&self) -> Result<Option<String>, PlexError> {
+        let resp = self.authed_get("/identity").await?;
+        let env = resp.json::<RootEnvelope>().map_err(PlexError::Http)?;
+        Ok(env.media_container.and_then(|c| c.version))
+    }
+
+    pub async fn prefs(&self) -> Result<Vec<(String, String)>, PlexError> {
+        let resp = self.authed_get("/:/prefs").await?;
+        let env = resp.json::<PrefsEnvelope>().map_err(PlexError::Http)?;
+        Ok(env
+            .media_container
+            .unwrap_or_default()
+            .setting
+            .into_iter()
+            .map(|s| {
+                let value = match s.value {
+                    plugin_toolkit::serde_json::Value::String(v) => v,
+                    plugin_toolkit::serde_json::Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                (s.id, value)
+            })
+            .collect())
+    }
+
+    pub async fn set_pref(&self, id: &str, value: &str) -> Result<(), PlexError> {
+        self.http
+            .put(self.url("/:/prefs"))
+            .query(id, value)
+            .header("x-plex-token", &self.cfg.token)
+            .header("accept", "application/json")
+            .retry(true)
+            .send()
+            .await?;
+        Ok(())
     }
 
     async fn authed_get(&self, path: &str) -> std::result::Result<Response, HttpError> {

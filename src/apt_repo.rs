@@ -29,7 +29,7 @@ pub struct PlexAptRepoRepairOutput {
     pub actions: Vec<String>,
 }
 
-fn valid_target(runtime: Runtime, target: &str) -> bool {
+pub(crate) fn valid_target(runtime: Runtime, target: &str) -> bool {
     match runtime {
         Runtime::Lxc => !target.is_empty() && target.bytes().all(|b| b.is_ascii_digit()),
         Runtime::Docker => {
