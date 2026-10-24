@@ -38,7 +38,7 @@ path = "src/main.rs"
 # (serde / serde_json / schemars / clap / anyhow / thiserror / inventory / db /
 # rusqlite / async-trait / dispatch / contract / derive / macro-runtime / http /
 # time / notifications) is re-exported by the toolkit + its prelude.
-plugin-toolkit = { version = "=0.2.1-rc.39", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http"] }
+plugin-toolkit = { version = "=0.2.1-rc.47", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http"] }
 
 # serde / serde_json / thiserror: the toolkit's re-exported derives (`Serialize`,
 # `Deserialize`, `Error`) expand to bare `::serde` / `::thiserror` crate-root
