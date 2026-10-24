@@ -14,6 +14,11 @@ const ALLOWED: &[&str] = &[
     "cp",
     "env",
     "bash",
+    "find",
+    "grep",
+    "stat",
+    "pkill",
+    "runuser",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
