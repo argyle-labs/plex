@@ -43,7 +43,7 @@ pub struct PlexEndpoint {
 
 // ── HTTP client helper ──────────────────────────────────────────────────────
 
-fn make_client(name: &str) -> Result<Client> {
+pub(crate) fn make_client(name: &str) -> Result<Client> {
     let row = endpoint_db::get(name)?
         .with_context(|| format!("plex endpoint '{name}' not registered"))?;
     if !row.enabled {

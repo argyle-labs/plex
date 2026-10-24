@@ -264,6 +264,29 @@ pub(crate) fn guest(runtime: Runtime, id: &str) -> Command {
     cmd
 }
 
+pub(crate) fn guest_as(runtime: Runtime, id: &str, user: &str) -> Command {
+    let mut cmd = match runtime {
+        Runtime::Lxc => {
+            let mut c = Command::new("pct");
+            c.arg("exec")
+                .arg(id)
+                .arg("--")
+                .arg("runuser")
+                .arg("-u")
+                .arg(user)
+                .arg("--");
+            c
+        }
+        Runtime::Docker => {
+            let mut c = Command::new("docker");
+            c.arg("exec").arg("-u").arg(user).arg(id);
+            c
+        }
+    };
+    cmd.kill_on_drop(true);
+    cmd
+}
+
 /// Run a guest command, returning stdout; a non-zero exit carries stderr.
 pub(crate) async fn capture(mut cmd: Command) -> Result<String> {
     let out = cmd
