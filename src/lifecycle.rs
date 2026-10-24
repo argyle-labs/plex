@@ -12,7 +12,7 @@
 //! single gateway. Process exec uses the toolkit's re-exported `tokio`.
 #![allow(clippy::disallowed_types)]
 
-use crate::guest_exec::ExecOutput;
+use crate::guest_exec::{exec, ExecOutput, Guest, GuestOp, ServiceAction};
 use std::path::Path;
 
 use plugin_toolkit::prelude::*;
@@ -80,7 +80,11 @@ impl Channel {
 /// carries stderr — the lifecycle tools surface the runtime's own message
 /// rather than a bare exit code.
 async fn run(cmd: &mut Command) -> Result<ExecOutput> {
-    let output = crate::guest_exec::output(std::mem::replace(cmd, Command::new("true"))).await?;
+    let output: ExecOutput = cmd
+        .output()
+        .await
+        .with_context(|| "failed to spawn command".to_string())?
+        .into();
     if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("command failed ({}): {}", output.status, stderr.trim());
@@ -195,6 +199,29 @@ async fn plex_install(args: PlexInstallArgs, _ctx: &ToolCtx) -> Result<PlexInsta
     })
 }
 
+async fn update_lxc(guest: &Guest, tag: &str) -> Result<PlexUpdateOutput> {
+    let mut log = crate::apt_repo::repair(guest, false).await?;
+    log.push_str(
+        &exec(guest, GuestOp::AptUpgradePlex)
+            .await?
+            .checked("upgrade plexmediaserver")?,
+    );
+    let version = exec(guest, GuestOp::PlexVersion)
+        .await?
+        .checked("read plexmediaserver version")?
+        .trim()
+        .to_string();
+    if version.is_empty() {
+        bail!("plexmediaserver is not installed after upgrade");
+    }
+    Ok(PlexUpdateOutput {
+        updated: true,
+        image_tag: tag.to_string(),
+        log,
+        version: Some(version),
+    })
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // plex.update — channel-aware image/version bump
 // ═══════════════════════════════════════════════════════════════════════════
@@ -246,11 +273,15 @@ pub struct PlexUpdateOutput {
     pub image_tag: String,
     /// Combined stdout from the update step.
     pub log: String,
+    /// Installed plexmediaserver package version after the upgrade (LXC only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// **Update a Plex deployment** to the head of a release channel. On `docker`,
 /// re-pulls the channel image tag and recreates the container. On `lxc`, runs
-/// the in-CT package upgrade.
+/// the apt source repair, the in-CT package upgrade, and reads back the
+/// installed version.
 #[orca_tool(domain = "plex", verb = "update")]
 async fn plex_update(args: PlexUpdateArgs, _ctx: &ToolCtx) -> Result<PlexUpdateOutput> {
     let tag = args.channel.image_tag();
@@ -268,18 +299,14 @@ async fn plex_update(args: PlexUpdateArgs, _ctx: &ToolCtx) -> Result<PlexUpdateO
         }
         Runtime::Lxc => {
             let vmid = args.vmid.context("`vmid` is required when runtime=lxc")?;
-            run(Command::new("pct").arg("exec").arg(vmid.to_string()).arg("--").arg("bash").arg(
-                "-c",
-            ).arg(
-                "apt-get update && apt-get install -y --only-upgrade plexmediaserver && systemctl restart plexmediaserver",
-            ))
-            .await?
+            return update_lxc(&Guest::Lxc(vmid), tag).await;
         }
     };
     Ok(PlexUpdateOutput {
         updated: true,
         image_tag: tag.to_string(),
         log: String::from_utf8_lossy(&output.stdout).into_owned(),
+        version: None,
     })
 }
 
@@ -364,14 +391,12 @@ pub(crate) async fn restart_service(args: PlexRestartArgs) -> Result<PlexRestart
     let output = match args.runtime {
         Runtime::Lxc => {
             let vmid = args.vmid.expect("vmid presence checked above");
-            run(Command::new("pct")
-                .arg("exec")
-                .arg(vmid.to_string())
-                .arg("--")
-                .arg("systemctl")
-                .arg("restart")
-                .arg("plexmediaserver"))
-            .await?
+            crate::storage::service(&Guest::Lxc(vmid), ServiceAction::Restart).await?;
+            return Ok(PlexRestartOutput {
+                restarted: true,
+                runtime: args.runtime,
+                log: String::new(),
+            });
         }
         Runtime::Docker => run(Command::new("docker").arg("restart").arg(&args.container)).await?,
     };

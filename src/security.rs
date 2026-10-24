@@ -1,11 +1,10 @@
 #![allow(clippy::disallowed_types)]
 
 use plugin_toolkit::prelude::*;
-use tokio::process::Command;
 
 use crate::apt_repo::valid_target;
+use crate::guest_exec::{exec, Guest, GuestOp};
 use crate::lifecycle::{self, PlexRestartArgs, Runtime};
-use crate::storage::{capture, guest, guest_as};
 
 pub const MIN_PATCHED_VERSION: &str = "1.42.2.10157";
 
@@ -20,7 +19,7 @@ const REMOTE_PREFS: &[&str] = &[
     "ManualPortMappingPort",
 ];
 
-const GREP_PATTERNS: &[&str] = &[
+pub(crate) const GREP_PATTERNS: &[&str] = &[
     "/player/proxy/poll",
     "/player/timeline/subscribe",
     "protocol=http",
@@ -562,37 +561,15 @@ pub fn quarantine_path(quarantine_dir: &str, codecs_dir: &str, file: &str, stamp
     format!("{quarantine_dir}/{rel}.{stamp}.quarantined")
 }
 
-async fn output_of(mut cmd: Command) -> Result<(Option<i32>, String)> {
-    let out = cmd
-        .output()
-        .await
-        .context("failed to spawn guest command")?;
-    Ok((
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    ))
-}
-
-async fn list_codec_entries(
-    runtime: Runtime,
-    target: &str,
-    data_dir: &str,
-) -> Result<Vec<CodecEntry>> {
-    let mut cmd = guest(runtime, target);
-    cmd.arg("find")
-        .arg(format!("{data_dir}/Codecs"))
-        .arg("-mindepth")
-        .arg("1")
-        .arg("(")
-        .arg("-type")
-        .arg("f")
-        .arg("-o")
-        .arg("-type")
-        .arg("l")
-        .arg(")")
-        .arg("-printf")
-        .arg("%T@ %y %p\\0");
-    let out = capture(cmd).await.context("list Codecs directory")?;
+async fn list_codec_entries(guest: &Guest, data_dir: &str) -> Result<Vec<CodecEntry>> {
+    let out = exec(
+        guest,
+        GuestOp::SecurityListCodecs {
+            data_dir: data_dir.to_string(),
+        },
+    )
+    .await?
+    .checked("list Codecs directory")?;
     Ok(parse_find_output(&out))
 }
 
@@ -601,52 +578,64 @@ struct LogScan {
     partial: bool,
 }
 
-async fn scan_logs(runtime: Runtime, target: &str, data_dir: &str) -> Result<Option<LogScan>> {
-    let mut find = guest(runtime, target);
-    find.arg("find")
-        .arg(format!("{data_dir}/Logs"))
-        .arg("-maxdepth")
-        .arg("1")
-        .arg("-type")
-        .arg("f")
-        .arg("-name")
-        .arg("Plex*.log")
-        .arg("-print0");
-    let listed = capture(find).await.context("list Plex logs")?;
-    let logs: Vec<&str> = listed.split('\0').filter(|p| !p.is_empty()).collect();
+async fn scan_logs(guest: &Guest, data_dir: &str) -> Result<Option<LogScan>> {
+    let listed = exec(
+        guest,
+        GuestOp::SecurityListLogs {
+            data_dir: data_dir.to_string(),
+        },
+    )
+    .await?
+    .checked("list Plex logs")?;
+    let logs: Vec<String> = listed
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
     if logs.is_empty() {
         return Ok(None);
     }
-    let mut cmd = guest(runtime, target);
-    cmd.arg("grep").arg("-h").arg("-s").arg("-i").arg("-F");
-    for p in GREP_PATTERNS {
-        cmd.arg("-e").arg(p);
-    }
-    cmd.arg("--").args(&logs);
-    let (code, out) = output_of(cmd).await?;
-    match code {
+    let out = exec(
+        guest,
+        GuestOp::SecurityGrepLogs {
+            data_dir: data_dir.to_string(),
+            logs,
+        },
+    )
+    .await?;
+    let text = out.stdout_string();
+    match out.code {
         Some(0 | 1) => Ok(Some(LogScan {
-            output: out,
+            output: text,
             partial: false,
         })),
-        Some(2) if !out.is_empty() => Ok(Some(LogScan {
-            output: out,
+        Some(2) if !text.is_empty() => Ok(Some(LogScan {
+            output: text,
             partial: true,
         })),
         _ => Ok(None),
     }
 }
 
-fn valid_user(u: &str) -> bool {
-    !u.is_empty()
+pub(crate) fn valid_user(u: &str) -> bool {
+    u.bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
         && u.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-async fn data_dir_owner(runtime: Runtime, target: &str, data_dir: &str) -> Result<String> {
-    let mut cmd = guest(runtime, target);
-    cmd.arg("stat").arg("-c").arg("%U").arg("--").arg(data_dir);
-    let owner = capture(cmd).await?.trim().to_string();
+async fn data_dir_owner(guest: &Guest, data_dir: &str) -> Result<String> {
+    let owner = exec(
+        guest,
+        GuestOp::SecurityDataDirOwner {
+            data_dir: data_dir.to_string(),
+        },
+    )
+    .await?
+    .checked("stat data_dir")?
+    .trim()
+    .to_string();
     if !valid_user(&owner) || owner == "UNKNOWN" {
         bail!("data_dir owner {owner:?} is not a usable user name");
     }
@@ -750,8 +739,9 @@ async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> 
             findings.push(finding("logs", Severity::Unchecked, "no target given"));
         }
         Some(t) => {
+            let guest = Guest::parse(args.runtime, t)?;
             let codecs_dir = format!("{}/Codecs", args.data_dir);
-            match list_codec_entries(args.runtime, t, &args.data_dir).await {
+            match list_codec_entries(&guest, &args.data_dir).await {
                 Ok(entries) => {
                     codec_suspects = classify_codecs(&codecs_dir, &entries, &prefs);
                     for s in &codec_suspects {
@@ -764,7 +754,7 @@ async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> 
                 }
                 Err(e) => findings.push(finding("codecs", Severity::Unchecked, format!("{e:#}"))),
             }
-            match scan_logs(args.runtime, t, &args.data_dir).await {
+            match scan_logs(&guest, &args.data_dir).await {
                 Ok(Some(scan)) => {
                     if scan.partial {
                         findings.push(finding(
@@ -895,27 +885,23 @@ pub struct PlexSecurityHardenOutput {
 }
 
 async fn quarantine_one(
-    runtime: Runtime,
-    target: &str,
+    guest: &Guest,
+    data_dir: &str,
     user: &str,
     src: &str,
     dest: &str,
 ) -> Result<()> {
-    let mut mv = guest_as(runtime, target, user);
-    mv.arg("mv").arg("-n").arg("--").arg(src).arg(dest);
-    capture(mv).await?;
-    let mut verify = guest_as(runtime, target, user);
-    verify
-        .arg("sh")
-        .arg("-c")
-        .arg(r#"[ ! -e "$1" ] && [ ! -L "$1" ] && { [ -e "$2" ] || [ -L "$2" ]; }"#)
-        .arg("verify")
-        .arg(src)
-        .arg(dest);
-    capture(verify).await.context("move not verified")?;
-    let mut chmod = guest_as(runtime, target, user);
-    chmod.arg("chmod").arg("000").arg("--").arg(dest);
-    capture(chmod).await?;
+    exec(
+        guest,
+        GuestOp::SecurityQuarantine {
+            data_dir: data_dir.to_string(),
+            user: user.to_string(),
+            src: src.to_string(),
+            dest: dest.to_string(),
+        },
+    )
+    .await?
+    .checked("quarantine (move verified + chmod)")?;
     Ok(())
 }
 
@@ -971,10 +957,11 @@ async fn plex_security_harden(
     let mut transcoders_killed = false;
     let mut restarted = false;
     if let Some(t) = args.target.as_deref() {
+        let guest = Guest::parse(args.runtime, t)?;
         let codecs_dir = format!("{}/Codecs", args.data_dir);
         let user = match args.run_as.clone() {
             Some(u) => Some(u),
-            None => match data_dir_owner(args.runtime, t, &args.data_dir).await {
+            None => match data_dir_owner(&guest, &args.data_dir).await {
                 Ok(u) => Some(u),
                 Err(e) => {
                     errors.push(format!("resolve run_as: {e:#}"));
@@ -983,7 +970,7 @@ async fn plex_security_harden(
             },
         };
         match (
-            list_codec_entries(args.runtime, t, &args.data_dir).await,
+            list_codec_entries(&guest, &args.data_dir).await,
             user.as_deref(),
         ) {
             (Err(e), _) => errors.push(format!("{e:#}")),
@@ -995,25 +982,14 @@ async fn plex_security_harden(
                     .into_iter()
                     .filter(|s| s.quarantinable)
                     .collect();
-                let mut qdir_ready = dry_run;
-                if !dry_run && !suspects.is_empty() {
-                    let mut mk = guest_as(args.runtime, t, user);
-                    mk.arg("mkdir").arg("-p").arg("--").arg(&qdir);
-                    match capture(mk).await {
-                        Ok(_) => qdir_ready = true,
-                        Err(e) => errors.push(format!("create quarantine dir: {e:#}")),
-                    }
-                }
                 for s in suspects {
                     let dest = quarantine_path(&qdir, &codecs_dir, &s.path, &stamp);
                     let error = if !safe_codec_path(&args.data_dir, &s.path) {
                         Some("refused: path outside Codecs or unsafe".to_string())
-                    } else if !qdir_ready {
-                        Some("quarantine dir unavailable".to_string())
                     } else if dry_run {
                         None
                     } else {
-                        quarantine_one(args.runtime, t, user, &s.path, &dest)
+                        quarantine_one(&guest, &args.data_dir, user, &s.path, &dest)
                             .await
                             .err()
                             .map(|e| format!("{e:#}"))
@@ -1030,15 +1006,20 @@ async fn plex_security_harden(
         }
 
         if args.kill_transcoders && !dry_run {
-            let mut kill = guest(args.runtime, t);
-            kill.arg("pkill").arg("-x").arg("Plex Transcoder");
-            if let Some(u) = user.as_deref() {
-                kill.arg("-u").arg(u);
-            }
-            match output_of(kill).await {
-                Ok((Some(0 | 1), _)) => transcoders_killed = true,
-                Ok((code, _)) => errors.push(format!("pkill transcoders exited {code:?}")),
-                Err(e) => errors.push(format!("{e:#}")),
+            match user.as_deref() {
+                None => errors.push("kill_transcoders skipped: no run_as user".to_string()),
+                Some(u) => match exec(
+                    &guest,
+                    GuestOp::KillTranscoders {
+                        user: u.to_string(),
+                    },
+                )
+                .await
+                {
+                    Ok(out) if matches!(out.code, Some(0 | 1)) => transcoders_killed = true,
+                    Ok(out) => errors.push(format!("pkill transcoders exited {:?}", out.code)),
+                    Err(e) => errors.push(format!("{e:#}")),
+                },
             }
         }
 
