@@ -291,10 +291,53 @@ fn segment_stop(b: u8) -> bool {
 }
 
 fn param_stop(b: u8) -> bool {
-    matches!(
-        b,
-        b'&' | b' ' | b'"' | b'\'' | b'#' | b']' | b',' | b';' | b'%'
-    )
+    matches!(b, b'&' | b' ' | b'"' | b'\'' | b'#' | b']' | b',' | b';')
+}
+
+fn redact_param(out: &mut String, s: &str, start: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut end = start;
+    while end < bytes.len()
+        && !param_stop(bytes[end])
+        && !bytes[end..].eq_ignore_ascii_case_prefix(b"%26")
+    {
+        end += 1;
+    }
+    if end > start {
+        out.push_str("***");
+    }
+    end
+}
+
+trait PrefixCi {
+    fn eq_ignore_ascii_case_prefix(&self, p: &[u8]) -> bool;
+}
+
+impl PrefixCi for [u8] {
+    fn eq_ignore_ascii_case_prefix(&self, p: &[u8]) -> bool {
+        self.len() >= p.len() && self[..p.len()].eq_ignore_ascii_case(p)
+    }
+}
+
+fn skip_ws(bytes: &[u8], mut v: usize) -> usize {
+    while v < bytes.len() && bytes[v].is_ascii_whitespace() {
+        v += 1;
+    }
+    v
+}
+
+fn after_authorization(lb: &[u8], i: usize) -> bool {
+    let mut j = i;
+    while j > 0 && lb[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    [b"authorization:".as_slice(), b"authorization=".as_slice()]
+        .iter()
+        .any(|suf| j >= suf.len() && lb[j - suf.len()..j].eq_ignore_ascii_case(suf))
+}
+
+fn bearer_stop(b: u8) -> bool {
+    b.is_ascii_whitespace() || matches!(b, b'&' | b'"' | b'\'' | b',' | b';')
 }
 
 fn ident_byte(b: u8) -> bool {
@@ -303,29 +346,49 @@ fn ident_byte(b: u8) -> bool {
 
 pub fn scrub_tokens(line: &str) -> String {
     let s = plugin_toolkit::logging::scrub(line).into_owned();
-    let lower = s.to_ascii_lowercase();
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < bytes.len() {
-        let rest = &lower[i..];
-        if rest.starts_with("getresultfromnetwork?url=") {
+        let rest = &bytes[i..];
+        let boundary = i == 0 || !ident_byte(bytes[i - 1]);
+        if rest.eq_ignore_ascii_case_prefix(b"getresultfromnetwork?url=") {
             let v = i + "getresultfromnetwork?url=".len();
             out.push_str(&s[i..v]);
             i = redact_value(&mut out, &s, v, url_stop);
             continue;
         }
-        if rest.starts_with("/leak/") {
+        if rest.eq_ignore_ascii_case_prefix(b"/leak/") {
             out.push_str(&s[i..i + 6]);
             i = redact_value(&mut out, &s, i + 6, segment_stop);
             continue;
         }
-        if rest.starts_with("tkn_") && (i == 0 || !ident_byte(bytes[i - 1])) {
+        let scheme = if rest.eq_ignore_ascii_case_prefix(b"bearer") {
+            Some(6)
+        } else if rest.eq_ignore_ascii_case_prefix(b"basic") && after_authorization(bytes, i) {
+            Some(5)
+        } else {
+            None
+        };
+        if let Some(n) = scheme.filter(|_| boundary) {
+            let sep = bytes.get(i + n).copied();
+            if sep.is_some_and(|b| b.is_ascii_whitespace() || b == b'=') {
+                let v = skip_ws(bytes, i + n + 1);
+                out.push_str(&s[i..v]);
+                i = if bytes[v..].starts_with(b"***") {
+                    v
+                } else {
+                    redact_value(&mut out, &s, v, bearer_stop)
+                };
+                continue;
+            }
+        }
+        if rest.eq_ignore_ascii_case_prefix(b"tkn_") && boundary {
             out.push_str(&s[i..i + 4]);
             i = redact_value(&mut out, &s, i + 4, |b| !b.is_ascii_alphanumeric());
             continue;
         }
-        if ident_byte(bytes[i]) && (i == 0 || !ident_byte(bytes[i - 1])) {
+        if ident_byte(bytes[i]) && boundary {
             let mut end = i;
             while end < bytes.len() && ident_byte(bytes[end]) {
                 end += 1;
@@ -334,21 +397,22 @@ pub fn scrub_tokens(line: &str) -> String {
             while v < bytes.len() && matches!(bytes[v], b' ' | b'"') {
                 v += 1;
             }
-            let encoded_sep = lower[v..].starts_with("%3d") || lower[v..].starts_with("%3a");
-            if lower[i..end].contains("token")
-                && v < bytes.len()
-                && (matches!(bytes[v], b'=' | b':') || encoded_sep)
-            {
+            let encoded_sep = bytes[v..].eq_ignore_ascii_case_prefix(b"%3d")
+                || bytes[v..].eq_ignore_ascii_case_prefix(b"%3a");
+            let is_token = bytes[i..end]
+                .windows(5)
+                .any(|w| w.eq_ignore_ascii_case(b"token"));
+            if is_token && v < bytes.len() && (matches!(bytes[v], b'=' | b':') || encoded_sep) {
                 v += if encoded_sep { 3 } else { 1 };
                 while v < bytes.len() && matches!(bytes[v], b' ' | b'"') {
                     v += 1;
                 }
                 out.push_str(&s[i..v]);
-                if s[v..].starts_with("***") {
-                    i = v;
+                i = if bytes[v..].starts_with(b"***") {
+                    v
                 } else {
-                    i = redact_value(&mut out, &s, v, param_stop);
-                }
+                    redact_param(&mut out, &s, v)
+                };
                 continue;
             }
             out.push_str(&s[i..end]);
@@ -697,9 +761,9 @@ async fn scan_logs(guest: &Guest, data_dir: &str) -> Result<Option<LogScan>> {
 }
 
 pub(crate) fn valid_user(u: &str) -> bool {
-    !u.is_empty()
+    u.bytes().next().is_some_and(|b| b != b'-' && b != b'.')
         && u.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
 pub fn parse_owner(out: &str) -> Result<String> {
@@ -1461,6 +1525,28 @@ mod tests {
         assert!(!l.contains("SECRETID") && l.contains("/more"));
         let e = scrub_tokens("GET /x?X-Plex-Token%3DENCODED999%26b=2 tail");
         assert!(!e.contains("ENCODED999") && e.contains("tail"));
+        let pct = scrub_tokens("token=ab%2Fcd%3Def%26next=1");
+        assert!(!pct.contains("cd") && !pct.contains("ef") && pct.contains("%26next=1"));
+        let h = scrub_tokens("Authorization: Bearer eyJhbGciOi.payload.sig rest");
+        assert!(!h.contains("eyJhbGciOi") && h.contains("rest"));
+        let q = scrub_tokens("x?bearer=ZZZ999&y=1");
+        assert!(!q.contains("ZZZ999") && q.contains("&y=1"));
+        let tab = scrub_tokens("authorization: Bearer\tTABTOK123 end");
+        assert!(!tab.contains("TABTOK123") && tab.contains("end"));
+        let basic = scrub_tokens("Authorization: Basic dXNlcjpwYXNz rest");
+        assert!(!basic.contains("dXNlcjpwYXNz") && basic.contains("rest"));
+        assert!(scrub_tokens("a basic setup").contains("basic setup"));
+        for line in [
+            "AUTHORIZATION=Basic QUJD rest",
+            "AuThOrIzAtIoN: bAsIc QUJD rest",
+        ] {
+            let r = scrub_tokens(line);
+            assert!(!r.contains("QUJD") && r.ends_with(" rest"), "{r}");
+        }
+        let mb = scrub_tokens("X-Plex-Token=héllo\u{FFFD}日本%26next=1 tail");
+        assert!(!mb.contains("héllo") && !mb.contains('日') && mb.contains("%26next=1 tail"));
+        let mb2 = scrub_tokens("token=\u{FFFD}\u{FFFD} /leak/ü€ GetResultFromNetwork?url=ünï x");
+        assert!(!mb2.contains('\u{FFFD}') && !mb2.contains('€') && !mb2.contains("ünï"));
         let t = scrub_tokens("name TKN_abc123 tail");
         assert!(!t.contains("abc123") && t.contains("tail"));
     }

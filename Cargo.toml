@@ -7,6 +7,12 @@ description = "Self-hosted Plex Media Server with GPU hardware transcoding — o
 [package.metadata.orca]
 category = "media"
 
+[package.metadata.orca.privileged]
+seam = "plugin-apply"
+guest_tag = "plex"
+guest_tag_check = "unprivileged-side via proxmox.guest.label.audit; the privileged side cannot make tool calls"
+guest_marker = "/usr/lib/plexmediaserver/Plex Media Server"
+
 [lib]
 name = "plex"
 path = "src/lib.rs"
