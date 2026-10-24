@@ -32,11 +32,7 @@ path = "src/main.rs"
 # (serde / serde_json / schemars / clap / anyhow / thiserror / inventory / db /
 # rusqlite / async-trait / dispatch / contract / derive / macro-runtime / http /
 # time / notifications) is re-exported by the toolkit + its prelude.
-#
-# The committed `[patch]` in `.cargo/config.toml` overrides this to the local
-# in-tree toolkit for development; the git branch is what an external checkout
-# without the orca repo resolves against.
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http"] }
+plugin-toolkit = { version = "=0.2.1-rc.39", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http"] }
 
 # serde / serde_json / thiserror: the toolkit's re-exported derives (`Serialize`,
 # `Deserialize`, `Error`) expand to bare `::serde` / `::thiserror` crate-root
