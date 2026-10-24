@@ -1,12 +1,11 @@
 #![allow(clippy::disallowed_types)]
 
 use plugin_toolkit::prelude::*;
-use tokio::process::Command;
 
+use crate::guest_exec::{exec, Guest, GuestOp};
 use crate::lifecycle::Runtime;
-use crate::storage::{capture, guest};
 
-const SCRIPT: &str = include_str!("../scripts/apt-repo.sh");
+pub(crate) const SCRIPT: &str = include_str!("../scripts/apt-repo.sh");
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[schemars(crate = "plugin_toolkit::schemars")]
@@ -44,14 +43,10 @@ pub(crate) fn valid_target(runtime: Runtime, target: &str) -> bool {
     }
 }
 
-fn repair_command(runtime: Runtime, target: &str, dry_run: bool) -> Command {
-    let mut cmd = guest(runtime, target);
-    cmd.arg("env")
-        .arg(format!("DRY_RUN={}", if dry_run { "1" } else { "0" }))
-        .arg("bash")
-        .arg("-c")
-        .arg(SCRIPT);
-    cmd
+pub(crate) async fn repair(guest: &Guest, dry_run: bool) -> Result<String> {
+    exec(guest, GuestOp::AptRepoRepair { dry_run })
+        .await?
+        .checked("repair plex apt source")
 }
 
 fn parse_output(stdout: &str, dry_run: bool) -> PlexAptRepoRepairOutput {
@@ -82,27 +77,15 @@ async fn plex_apt_repo_repair(
     args: PlexAptRepoRepairArgs,
     ctx: &ToolCtx,
 ) -> Result<PlexAptRepoRepairOutput> {
-    if !valid_target(args.runtime, &args.target) {
-        bail!("invalid target {:?}", args.target);
-    }
+    let guest = Guest::parse(args.runtime, &args.target)?;
     let dry_run = ctx.dry_run();
-    let stdout = capture(repair_command(args.runtime, &args.target, dry_run))
-        .await
-        .context("repair plex apt source")?;
+    let stdout = repair(&guest, dry_run).await?;
     Ok(parse_output(&stdout, dry_run))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn argv(cmd: &Command) -> Vec<String> {
-        let std = cmd.as_std();
-        std::iter::once(std.get_program())
-            .chain(std.get_args())
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect()
-    }
 
     #[test]
     fn targets_reject_option_injection() {
@@ -122,20 +105,6 @@ mod tests {
         assert!(install < write && write < remove);
         assert!(SCRIPT.contains("mv -f \"$dearmored\" \"$KEYRING\""));
         assert!(SCRIPT.contains("mv -f \"$tmp\" \"$LIST\""));
-    }
-
-    #[test]
-    fn lxc_command_runs_script_through_pct_exec() {
-        let a = argv(&repair_command(Runtime::Lxc, "105", true));
-        assert_eq!(&a[..6], ["pct", "exec", "105", "--", "env", "DRY_RUN=1"]);
-        assert_eq!(&a[6..8], ["bash", "-c"]);
-        assert_eq!(a[8], SCRIPT);
-    }
-
-    #[test]
-    fn docker_command_runs_script_through_docker_exec() {
-        let a = argv(&repair_command(Runtime::Docker, "plex", false));
-        assert_eq!(&a[..5], ["docker", "exec", "plex", "env", "DRY_RUN=0"]);
     }
 
     #[test]

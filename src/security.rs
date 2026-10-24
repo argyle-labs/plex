@@ -1,11 +1,9 @@
 #![allow(clippy::disallowed_types)]
 
-use plugin_toolkit::prelude::*;
-use tokio::process::Command;
-
 use crate::apt_repo::valid_target;
+use crate::guest_exec::{exec, quarantine_dir, Guest, GuestOp};
 use crate::lifecycle::{self, PlexRestartArgs, Runtime};
-use crate::storage::{capture, guest, guest_as};
+use plugin_toolkit::prelude::*;
 
 pub const MIN_PATCHED_VERSION: &str = "1.42.2.10157";
 
@@ -20,7 +18,7 @@ const REMOTE_PREFS: &[&str] = &[
     "ManualPortMappingPort",
 ];
 
-const GREP_PATTERNS: &[&str] = &[
+pub(crate) const GREP_PATTERNS: &[&str] = &[
     "/player/proxy/poll",
     "/player/timeline/subscribe",
     "protocol=http",
@@ -34,9 +32,7 @@ const GREP_PATTERNS: &[&str] = &[
     "resources/x?resource_name=",
 ];
 
-const QUARANTINE_ROOT: &str = "/var/lib/orca-quarantine/plex";
-
-const QUARANTINE_NOTE: &str = "quarantined files sit in a root-owned 0700 dir under /var/lib/orca-quarantine/plex inside the guest; copy them off-box for analysis and delete";
+const QUARANTINE_NOTE: &str = "quarantined files sit in a root-owned 0700 dir under /var/lib/orca-quarantine/plex inside the guest (in a docker container this is the writable layer and is lost when the container is recreated); copy them off-box for analysis and delete";
 
 const RECHECK_NOTE: &str =
     "kill transcoders and restart Plex only after a re-check reports no remaining Codecs suspects";
@@ -644,41 +640,15 @@ pub fn quarantine_path(quarantine_dir: &str, codecs_dir: &str, file: &str) -> St
     format!("{quarantine_dir}/{rel}.{}.quarantined", short_hash(full))
 }
 
-pub fn quarantine_dir(stamp: &str) -> String {
-    format!("{QUARANTINE_ROOT}/{stamp}")
-}
-
-async fn output_of(mut cmd: Command) -> Result<(Option<i32>, String)> {
-    let out = cmd
-        .output()
-        .await
-        .context("failed to spawn guest command")?;
-    Ok((
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    ))
-}
-
-async fn list_codec_entries(
-    runtime: Runtime,
-    target: &str,
-    data_dir: &str,
-) -> Result<Vec<CodecEntry>> {
-    let mut cmd = guest(runtime, target);
-    cmd.arg("find")
-        .arg(format!("{data_dir}/Codecs"))
-        .arg("-mindepth")
-        .arg("1")
-        .arg("(")
-        .arg("-type")
-        .arg("f")
-        .arg("-o")
-        .arg("-type")
-        .arg("l")
-        .arg(")")
-        .arg("-printf")
-        .arg("%T@ %y %p\\0");
-    let out = capture(cmd).await.context("list Codecs directory")?;
+async fn list_codec_entries(guest: &Guest, data_dir: &str) -> Result<Vec<CodecEntry>> {
+    let out = exec(
+        guest,
+        GuestOp::SecurityListCodecs {
+            data_dir: data_dir.to_string(),
+        },
+    )
+    .await?
+    .checked("list Codecs directory")?;
     Ok(parse_find_output(&out))
 }
 
@@ -687,51 +657,50 @@ struct LogScan {
     partial: bool,
 }
 
-async fn scan_logs(runtime: Runtime, target: &str, data_dir: &str) -> Result<Option<LogScan>> {
-    let mut find = guest(runtime, target);
-    find.arg("find")
-        .arg(format!("{data_dir}/Logs"))
-        .arg("-maxdepth")
-        .arg("1")
-        .arg("-type")
-        .arg("f")
-        .arg("-name")
-        .arg("Plex*.log")
-        .arg("-print0");
-    let listed = capture(find).await.context("list Plex logs")?;
-    let logs: Vec<&str> = listed.split('\0').filter(|p| !p.is_empty()).collect();
+async fn scan_logs(guest: &Guest, data_dir: &str) -> Result<Option<LogScan>> {
+    let listed = exec(
+        guest,
+        GuestOp::SecurityListLogs {
+            data_dir: data_dir.to_string(),
+        },
+    )
+    .await?
+    .checked("list Plex logs")?;
+    let logs: Vec<String> = listed
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
     if logs.is_empty() {
         return Ok(None);
     }
-    let mut cmd = guest(runtime, target);
-    cmd.arg("grep").arg("-h").arg("-s").arg("-i").arg("-F");
-    for p in GREP_PATTERNS {
-        cmd.arg("-e").arg(p);
-    }
-    cmd.arg("--").args(&logs);
-    let (code, out) = output_of(cmd).await?;
-    match code {
+    let out = exec(
+        guest,
+        GuestOp::SecurityGrepLogs {
+            data_dir: data_dir.to_string(),
+            logs,
+        },
+    )
+    .await?;
+    let text = out.stdout_string();
+    match out.code {
         Some(0 | 1) => Ok(Some(LogScan {
-            output: out,
+            output: text,
             partial: false,
         })),
-        Some(2) if !out.is_empty() => Ok(Some(LogScan {
-            output: out,
+        Some(2) if !text.is_empty() => Ok(Some(LogScan {
+            output: text,
             partial: true,
         })),
         _ => Ok(None),
     }
 }
 
-fn valid_user(u: &str) -> bool {
+pub(crate) fn valid_user(u: &str) -> bool {
     !u.is_empty()
         && u.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
-
-const DATA_DIR_OWNER_SH: &str = r#"[ ! -L "$1" ] || { echo "data_dir is a symlink" >&2; exit 3; }
-[ "$(realpath -e -- "$1")" = "$1" ] || { echo "data_dir does not resolve to itself" >&2; exit 3; }
-stat -L -c %u/%U -- "$1""#;
 
 pub fn parse_owner(out: &str) -> Result<String> {
     let (uid, name) = out
@@ -739,9 +708,7 @@ pub fn parse_owner(out: &str) -> Result<String> {
         .split_once('/')
         .ok_or_else(|| anyhow!("unexpected stat output {out:?}"))?;
     if uid == "0" {
-        bail!(
-            "data_dir is owned by uid 0; pass run_as explicitly to quarantine as root-owned data"
-        );
+        bail!("data_dir is owned by uid 0; refusing to act as root");
     }
     if !valid_user(name) || name == "UNKNOWN" {
         bail!("data_dir owner {name:?} is not a usable user name");
@@ -749,14 +716,15 @@ pub fn parse_owner(out: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
-async fn check_data_dir(runtime: Runtime, target: &str, data_dir: &str) -> Result<String> {
-    let mut cmd = guest(runtime, target);
-    cmd.arg("sh")
-        .arg("-c")
-        .arg(DATA_DIR_OWNER_SH)
-        .arg("owner")
-        .arg(data_dir);
-    capture(cmd).await
+async fn check_data_dir(guest: &Guest, data_dir: &str) -> Result<String> {
+    exec(
+        guest,
+        GuestOp::SecurityDataDirOwner {
+            data_dir: data_dir.to_string(),
+        },
+    )
+    .await?
+    .checked("data_dir check")
 }
 
 fn checked(runtime: Runtime, target: Option<&str>, data_dir: &str) -> Result<()> {
@@ -857,7 +825,8 @@ async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> 
         }
         Some(t) => {
             let codecs_dir = format!("{}/Codecs", args.data_dir);
-            match list_codec_entries(args.runtime, t, &args.data_dir).await {
+            let guest = Guest::parse(args.runtime, t)?;
+            match list_codec_entries(&guest, &args.data_dir).await {
                 Ok(entries) => {
                     codec_suspects = classify_codecs(&codecs_dir, &entries, &prefs);
                     for s in &codec_suspects {
@@ -870,7 +839,7 @@ async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> 
                 }
                 Err(e) => findings.push(finding("codecs", Severity::Unchecked, format!("{e:#}"))),
             }
-            match scan_logs(args.runtime, t, &args.data_dir).await {
+            match scan_logs(&guest, &args.data_dir).await {
                 Ok(Some(scan)) => {
                     if scan.partial {
                         findings.push(finding(
@@ -954,10 +923,6 @@ pub struct PlexSecurityHardenArgs {
     #[arg(long, default_value_t = default_data_dir())]
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
-    /// Guest user for quarantine and transcoder kill; defaults to the owner of `data_dir`.
-    #[arg(long)]
-    #[serde(default)]
-    pub run_as: Option<String>,
     /// Also set PublishServerOnPlexOnlineKey=0.
     #[arg(long)]
     #[serde(default)]
@@ -1002,59 +967,36 @@ pub struct PlexSecurityHardenOutput {
     pub follow_ups: Vec<String>,
 }
 
-const MKQDIR_SH: &str = r#"set -eu
-umask 077
-[ "$(id -u)" = 0 ] || { echo "quarantine needs root in the guest" >&2; exit 3; }
-for d in /var /var/lib /var/lib/orca-quarantine /var/lib/orca-quarantine/plex "$1"; do
-  [ ! -L "$d" ] || { echo "symlink in quarantine path: $d" >&2; exit 3; }
-  [ -d "$d" ] || mkdir -m 0700 -- "$d"
-done
-[ "$(stat -c %u:%a -- "$1")" = 0:700 ] || { echo "quarantine dir not root 0700" >&2; exit 3; }"#;
-
-const QUARANTINE_SH: &str = r#"set -eu
-src=$1 dest=$2 codecs=$3
-dir=${src%/*} base=${src##*/}
-[ "$(realpath -e -- "$codecs")" = "$codecs" ] || { echo "Codecs dir does not resolve to itself" >&2; exit 3; }
-c=$dir
-while :; do
-  [ ! -L "$c" ] || { echo "symlinked parent: $c" >&2; exit 3; }
-  [ "$c" != "$codecs" ] || break
-  case "$c" in "$codecs"/*) c=${c%/*} ;; *) echo "parent escapes Codecs" >&2; exit 3 ;; esac
-done
-cd -P -- "$dir"
-case "$(pwd -P)/" in "$codecs"/*) ;; *) echo "realpath escapes Codecs" >&2; exit 3 ;; esac
-mv -n -T -- "./$base" "$dest"
-[ ! -e "./$base" ] && [ ! -L "./$base" ] || { echo "source still present" >&2; exit 4; }
-[ -e "$dest" ] || [ -L "$dest" ] || { echo "destination missing" >&2; exit 4; }
-if [ ! -L "$dest" ] && [ -f "$dest" ] && [ "$(stat -c %h -- "$dest")" = 1 ]; then chmod 000 -- "$dest"; fi"#;
-
-async fn make_quarantine_dir(runtime: Runtime, target: &str, qdir: &str) -> Result<()> {
-    let mut mk = guest_as(runtime, target, "root");
-    mk.arg("sh")
-        .arg("-c")
-        .arg(MKQDIR_SH)
-        .arg("mkqdir")
-        .arg(qdir);
-    capture(mk).await?;
+async fn make_quarantine_dir(guest: &Guest, stamp: &str) -> Result<()> {
+    exec(
+        guest,
+        GuestOp::SecurityMkQuarantineDir {
+            stamp: stamp.to_string(),
+        },
+    )
+    .await?
+    .checked("create quarantine dir")?;
     Ok(())
 }
 
 async fn quarantine_one(
-    runtime: Runtime,
-    target: &str,
-    codecs_dir: &str,
+    guest: &Guest,
+    data_dir: &str,
+    stamp: &str,
     src: &str,
     dest: &str,
 ) -> Result<()> {
-    let mut mv = guest_as(runtime, target, "root");
-    mv.arg("sh")
-        .arg("-c")
-        .arg(QUARANTINE_SH)
-        .arg("quarantine")
-        .arg(src)
-        .arg(dest)
-        .arg(codecs_dir);
-    capture(mv).await.context("quarantine move")?;
+    exec(
+        guest,
+        GuestOp::SecurityQuarantine {
+            data_dir: data_dir.to_string(),
+            stamp: stamp.to_string(),
+            src: src.to_string(),
+            dest: dest.to_string(),
+        },
+    )
+    .await?
+    .checked("quarantine move")?;
     Ok(())
 }
 
@@ -1089,11 +1031,6 @@ async fn plex_security_harden(
 ) -> Result<PlexSecurityHardenOutput> {
     let dry_run = ctx.dry_run();
     checked(args.runtime, args.target.as_deref(), &args.data_dir)?;
-    if let Some(u) = args.run_as.as_deref() {
-        if !valid_user(u) {
-            bail!("invalid run_as {u:?}");
-        }
-    }
     let client = crate::tools::make_client(&args.endpoint)?;
     let mut errors = Vec::new();
 
@@ -1124,33 +1061,29 @@ async fn plex_security_harden(
     let mut restarted = false;
     let mut user = None;
     if let Some(t) = args.target.as_deref() {
+        let guest = Guest::parse(args.runtime, t)?;
         let data_dir = args.data_dir.trim_end_matches('/');
         let codecs_dir = format!("{data_dir}/Codecs");
-        match check_data_dir(args.runtime, t, data_dir).await {
-            Err(e) => errors.push(format!("data_dir check: {e:#}")),
-            Ok(out) => match args.run_as.clone() {
-                Some(u) => user = Some(u),
-                None => match parse_owner(&out) {
-                    Ok(u) => user = Some(u),
-                    Err(e) => errors.push(format!("resolve run_as: {e:#}")),
-                },
+        match check_data_dir(&guest, data_dir).await {
+            Err(e) => errors.push(format!("{e:#}")),
+            Ok(out) => match parse_owner(&out) {
+                Ok(u) => user = Some(u),
+                Err(e) => errors.push(format!("resolve Plex user: {e:#}")),
             },
         }
-        match (
-            list_codec_entries(args.runtime, t, data_dir).await,
-            user.as_deref(),
-        ) {
+        match (list_codec_entries(&guest, data_dir).await, user.as_deref()) {
             (Err(e), _) => errors.push(format!("{e:#}")),
-            (Ok(_), None) => errors.push("quarantine skipped: no run_as user".to_string()),
+            (Ok(_), None) => errors.push("quarantine skipped: Plex user unresolved".to_string()),
             (Ok(entries), Some(_)) => {
-                let qdir = quarantine_dir(&plugin_toolkit::time::Timestamp::now().compact());
+                let stamp = plugin_toolkit::time::Timestamp::now().compact();
+                let qdir = quarantine_dir(&stamp);
                 let suspects: Vec<CodecSuspect> = classify_codecs(&codecs_dir, &entries, &prefs)
                     .into_iter()
                     .filter(|s| s.quarantinable)
                     .collect();
                 let mut qdir_ready = dry_run;
                 if !dry_run && !suspects.is_empty() {
-                    match make_quarantine_dir(args.runtime, t, &qdir).await {
+                    match make_quarantine_dir(&guest, &stamp).await {
                         Ok(()) => qdir_ready = true,
                         Err(e) => errors.push(format!("create quarantine dir: {e:#}")),
                     }
@@ -1164,7 +1097,7 @@ async fn plex_security_harden(
                     } else if dry_run {
                         None
                     } else {
-                        quarantine_one(args.runtime, t, &codecs_dir, &s.path, &dest)
+                        quarantine_one(&guest, data_dir, &stamp, &s.path, &dest)
                             .await
                             .err()
                             .map(|e| format!("{e:#}"))
@@ -1178,7 +1111,7 @@ async fn plex_security_harden(
                     });
                 }
                 if !dry_run && !quarantine.is_empty() {
-                    match list_codec_entries(args.runtime, t, data_dir).await {
+                    match list_codec_entries(&guest, data_dir).await {
                         Ok(after) => remaining = remaining_suspects(&codecs_dir, &after, &prefs),
                         Err(e) => errors.push(format!("re-check: {e:#}")),
                     }
@@ -1189,19 +1122,18 @@ async fn plex_security_harden(
         if args.kill_transcoders && !dry_run {
             match user.as_deref() {
                 None => errors.push("pkill skipped: Plex user unresolved".to_string()),
-                Some(u) => {
-                    let mut kill = guest(args.runtime, t);
-                    kill.arg("pkill")
-                        .arg("-x")
-                        .arg("-u")
-                        .arg(u)
-                        .arg("Plex Transcoder");
-                    match output_of(kill).await {
-                        Ok((Some(0 | 1), _)) => transcoders_killed = true,
-                        Ok((code, _)) => errors.push(format!("pkill transcoders exited {code:?}")),
-                        Err(e) => errors.push(format!("{e:#}")),
-                    }
-                }
+                Some(_) => match exec(
+                    &guest,
+                    GuestOp::KillTranscoders {
+                        data_dir: data_dir.to_string(),
+                    },
+                )
+                .await
+                {
+                    Ok(out) if matches!(out.code, Some(0 | 1)) => transcoders_killed = true,
+                    Ok(out) => errors.push(format!("pkill transcoders exited {:?}", out.code)),
+                    Err(e) => errors.push(format!("{e:#}")),
+                },
             }
         }
 
@@ -1462,73 +1394,6 @@ mod tests {
             quarantine_path("/q", "/d/Codecs", "/d/Codecs/a/b__x.so")
         );
         assert_eq!(quarantine_dir("s"), "/var/lib/orca-quarantine/plex/s");
-    }
-
-    #[test]
-    fn quarantine_script_never_chmods_symlinks() {
-        assert!(QUARANTINE_SH.contains(r#"if [ ! -L "$dest" ] && [ -f "$dest" ]"#));
-        assert!(QUARANTINE_SH.contains(r#"mv -n -T -- "./$base" "$dest""#));
-        assert!(QUARANTINE_SH.contains(r#"[ ! -L "$c" ]"#));
-        assert_eq!(QUARANTINE_SH.matches("chmod").count(), 1);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn symlink_suspect_moved_as_link_target_untouched() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        let codecs = root.join("Codecs");
-        let q = root.join("q");
-        std::fs::create_dir_all(codecs.join("a")).unwrap();
-        std::fs::create_dir(&q).unwrap();
-        let victim = root.join("victim");
-        std::fs::write(&victim, "x").unwrap();
-        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let link = codecs.join("a/evil.so");
-        std::os::unix::fs::symlink(&victim, &link).unwrap();
-        let dest = q.join("evil");
-        let st = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(QUARANTINE_SH)
-            .arg("t")
-            .arg(&link)
-            .arg(&dest)
-            .arg(&codecs)
-            .status()
-            .unwrap();
-        assert!(st.success());
-        assert!(std::fs::symlink_metadata(&dest)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(std::fs::symlink_metadata(&link).is_err());
-        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn symlinked_parent_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        let codecs = root.join("Codecs");
-        let outside = root.join("outside");
-        std::fs::create_dir_all(&codecs).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("f.so"), "x").unwrap();
-        std::os::unix::fs::symlink(&outside, codecs.join("a")).unwrap();
-        let st = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(QUARANTINE_SH)
-            .arg("t")
-            .arg(codecs.join("a/f.so"))
-            .arg(root.join("dest"))
-            .arg(&codecs)
-            .status()
-            .unwrap();
-        assert!(!st.success());
-        assert!(outside.join("f.so").exists());
     }
 
     #[test]

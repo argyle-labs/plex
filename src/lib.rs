@@ -29,6 +29,7 @@
 pub mod account;
 pub mod apt_repo;
 pub mod diag;
+pub mod guest_exec;
 pub mod lifecycle;
 pub mod remediation;
 pub mod security;
