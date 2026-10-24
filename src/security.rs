@@ -34,7 +34,12 @@ const GREP_PATTERNS: &[&str] = &[
     "resources/x?resource_name=",
 ];
 
-const QUARANTINE_NOTE: &str = "Codecs.quarantine is writable by the Plex user: it only takes files out of the codec load path, it is not containment; copy them off-box for analysis and delete";
+const QUARANTINE_ROOT: &str = "/var/lib/orca-quarantine/plex";
+
+const QUARANTINE_NOTE: &str = "quarantined files sit in a root-owned 0700 dir under /var/lib/orca-quarantine/plex inside the guest; copy them off-box for analysis and delete";
+
+const RECHECK_NOTE: &str =
+    "kill transcoders and restart Plex only after a re-check reports no remaining Codecs suspects";
 
 const MTIME_REASON: &str = "mtime differs from sibling majority";
 
@@ -138,7 +143,7 @@ fn has_so_ref(v: &str) -> bool {
         v[i + 3..]
             .chars()
             .next()
-            .is_none_or(|c| matches!(c, '.' | ':' | '=') || c.is_whitespace())
+            .is_none_or(|c| c.is_ascii_digit() || !c.is_alphanumeric())
     })
 }
 
@@ -367,6 +372,7 @@ fn is_non_wan_ip(ip: &str) -> bool {
             let o = a.octets();
             a.is_private()
                 || a.is_loopback()
+                || a.is_unspecified()
                 || a.is_link_local()
                 || (o[0] == 100 && (o[1] & 0xc0) == 64)
         }
@@ -374,6 +380,7 @@ fn is_non_wan_ip(ip: &str) -> bool {
             Some(v4) => is_non_wan_ip(&v4.to_string()),
             None => {
                 a.is_loopback()
+                    || a.is_unspecified()
                     || (a.segments()[0] & 0xfe00) == 0xfc00
                     || (a.segments()[0] & 0xffc0) == 0xfe80
             }
@@ -414,24 +421,89 @@ fn client_of(line: &str) -> (Option<String>, Option<bool>) {
     (Some(ip), Some(wan))
 }
 
+fn aton_part(p: &str) -> Option<u32> {
+    if let Some(hex) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    if p.len() > 1 && p.starts_with('0') {
+        return u32::from_str_radix(&p[1..], 8).ok();
+    }
+    p.parse().ok()
+}
+
+fn parse_ipv4_aton(host: &str) -> Option<std::net::Ipv4Addr> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 || parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    let nums = parts
+        .iter()
+        .map(|p| aton_part(p))
+        .collect::<Option<Vec<u32>>>()?;
+    let (head, last) = nums.split_at(nums.len() - 1);
+    if head.iter().any(|&n| n > 255) {
+        return None;
+    }
+    let rest_bits = 8 * (4 - head.len() as u32);
+    if rest_bits < 32 && last[0] >= 1 << rest_bits {
+        return None;
+    }
+    let mut n = 0u32;
+    for (i, &b) in head.iter().enumerate() {
+        n |= b << (24 - 8 * i as u32);
+    }
+    Some((n | last[0]).into())
+}
+
 fn parse_host_ip(host: &str) -> Option<std::net::IpAddr> {
+    let host = host.trim_end_matches('.');
     if let Ok(ip) = host.parse() {
         return Some(ip);
     }
-    let n = match host.strip_prefix("0x") {
-        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-        None => host.parse::<u32>().ok()?,
-    };
-    Some(std::net::IpAddr::V4(n.into()))
+    parse_ipv4_aton(host).map(std::net::IpAddr::V4)
+}
+
+fn percent_decode_once(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (
+                (b[i + 1] as char).to_digit(16),
+                (b[i + 2] as char).to_digit(16),
+            ) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn percent_decode_stable(s: &str) -> String {
+    let mut cur = s.to_string();
+    for _ in 0..16 {
+        let next = percent_decode_once(&cur);
+        if next == cur {
+            break;
+        }
+        cur = next;
+    }
+    cur
+}
+
+fn is_localhost_name(host: &str) -> bool {
+    let h = host.trim_end_matches('.');
+    h == "localhost" || h.ends_with(".localhost")
 }
 
 fn protocol_host(lower: &str) -> Option<String> {
     let p = lower.find("protocol=")?;
-    let v = lower[p + "protocol=".len()..]
-        .replace("%3a", ":")
-        .replace("%2f", "/")
-        .replace("%5b", "[")
-        .replace("%5d", "]");
+    let v = percent_decode_stable(&lower[p + "protocol=".len()..]).to_ascii_lowercase();
     let authority = v
         .split("://")
         .nth(1)?
@@ -452,7 +524,7 @@ fn protocol_targets_server(lower: &str, server_ips: &[String]) -> bool {
     let Some(host) = protocol_host(lower) else {
         return false;
     };
-    if host == "localhost" || server_ips.iter().any(|s| s.eq_ignore_ascii_case(&host)) {
+    if is_localhost_name(&host) || server_ips.iter().any(|s| s.eq_ignore_ascii_case(&host)) {
         return true;
     }
     match parse_host_ip(&host) {
@@ -556,10 +628,24 @@ pub fn safe_codec_path(data_dir: &str, path: &str) -> bool {
         && !has_control(path)
 }
 
-pub fn quarantine_path(quarantine_dir: &str, codecs_dir: &str, file: &str, stamp: &str) -> String {
+fn short_hash(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{:08x}", h as u32)
+}
+
+pub fn quarantine_path(quarantine_dir: &str, codecs_dir: &str, file: &str) -> String {
     let root = format!("{}/", codecs_dir.trim_end_matches('/'));
-    let rel = file.strip_prefix(&root).unwrap_or(file).replace('/', "__");
-    format!("{quarantine_dir}/{rel}.{stamp}.quarantined")
+    let full = file.strip_prefix(&root).unwrap_or(file);
+    let rel = full.replace('/', "__");
+    format!("{quarantine_dir}/{rel}.{}.quarantined", short_hash(full))
+}
+
+pub fn quarantine_dir(stamp: &str) -> String {
+    format!("{QUARANTINE_ROOT}/{stamp}")
 }
 
 async fn output_of(mut cmd: Command) -> Result<(Option<i32>, String)> {
@@ -643,14 +729,34 @@ fn valid_user(u: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-async fn data_dir_owner(runtime: Runtime, target: &str, data_dir: &str) -> Result<String> {
-    let mut cmd = guest(runtime, target);
-    cmd.arg("stat").arg("-c").arg("%U").arg("--").arg(data_dir);
-    let owner = capture(cmd).await?.trim().to_string();
-    if !valid_user(&owner) || owner == "UNKNOWN" {
-        bail!("data_dir owner {owner:?} is not a usable user name");
+const DATA_DIR_OWNER_SH: &str = r#"[ ! -L "$1" ] || { echo "data_dir is a symlink" >&2; exit 3; }
+[ "$(realpath -e -- "$1")" = "$1" ] || { echo "data_dir does not resolve to itself" >&2; exit 3; }
+stat -L -c %u/%U -- "$1""#;
+
+pub fn parse_owner(out: &str) -> Result<String> {
+    let (uid, name) = out
+        .trim()
+        .split_once('/')
+        .ok_or_else(|| anyhow!("unexpected stat output {out:?}"))?;
+    if uid == "0" {
+        bail!(
+            "data_dir is owned by uid 0; pass run_as explicitly to quarantine as root-owned data"
+        );
     }
-    Ok(owner)
+    if !valid_user(name) || name == "UNKNOWN" {
+        bail!("data_dir owner {name:?} is not a usable user name");
+    }
+    Ok(name.to_string())
+}
+
+async fn check_data_dir(runtime: Runtime, target: &str, data_dir: &str) -> Result<String> {
+    let mut cmd = guest(runtime, target);
+    cmd.arg("sh")
+        .arg("-c")
+        .arg(DATA_DIR_OWNER_SH)
+        .arg("owner")
+        .arg(data_dir);
+    capture(cmd).await
 }
 
 fn checked(runtime: Runtime, target: Option<&str>, data_dir: &str) -> Result<()> {
@@ -848,7 +954,6 @@ pub struct PlexSecurityHardenArgs {
     #[arg(long, default_value_t = default_data_dir())]
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
-    /// Guest user that owns the Plex data directory; quarantine runs as it.
     /// Guest user for quarantine and transcoder kill; defaults to the owner of `data_dir`.
     #[arg(long)]
     #[serde(default)]
@@ -888,41 +993,87 @@ pub struct PlexSecurityHardenOutput {
     pub remote_disabled: bool,
     pub remote_disable_planned: bool,
     pub quarantine: Vec<QuarantineResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
+    pub remaining_suspects: Vec<String>,
     pub transcoders_killed: bool,
     pub restarted: bool,
     pub errors: Vec<String>,
     pub follow_ups: Vec<String>,
 }
 
+const MKQDIR_SH: &str = r#"set -eu
+umask 077
+[ "$(id -u)" = 0 ] || { echo "quarantine needs root in the guest" >&2; exit 3; }
+for d in /var /var/lib /var/lib/orca-quarantine /var/lib/orca-quarantine/plex "$1"; do
+  [ ! -L "$d" ] || { echo "symlink in quarantine path: $d" >&2; exit 3; }
+  [ -d "$d" ] || mkdir -m 0700 -- "$d"
+done
+[ "$(stat -c %u:%a -- "$1")" = 0:700 ] || { echo "quarantine dir not root 0700" >&2; exit 3; }"#;
+
+const QUARANTINE_SH: &str = r#"set -eu
+src=$1 dest=$2 codecs=$3
+dir=${src%/*} base=${src##*/}
+[ "$(realpath -e -- "$codecs")" = "$codecs" ] || { echo "Codecs dir does not resolve to itself" >&2; exit 3; }
+c=$dir
+while :; do
+  [ ! -L "$c" ] || { echo "symlinked parent: $c" >&2; exit 3; }
+  [ "$c" != "$codecs" ] || break
+  case "$c" in "$codecs"/*) c=${c%/*} ;; *) echo "parent escapes Codecs" >&2; exit 3 ;; esac
+done
+cd -P -- "$dir"
+case "$(pwd -P)/" in "$codecs"/*) ;; *) echo "realpath escapes Codecs" >&2; exit 3 ;; esac
+mv -n -T -- "./$base" "$dest"
+[ ! -e "./$base" ] && [ ! -L "./$base" ] || { echo "source still present" >&2; exit 4; }
+[ -e "$dest" ] || [ -L "$dest" ] || { echo "destination missing" >&2; exit 4; }
+if [ ! -L "$dest" ] && [ -f "$dest" ] && [ "$(stat -c %h -- "$dest")" = 1 ]; then chmod 000 -- "$dest"; fi"#;
+
+async fn make_quarantine_dir(runtime: Runtime, target: &str, qdir: &str) -> Result<()> {
+    let mut mk = guest_as(runtime, target, "root");
+    mk.arg("sh")
+        .arg("-c")
+        .arg(MKQDIR_SH)
+        .arg("mkqdir")
+        .arg(qdir);
+    capture(mk).await?;
+    Ok(())
+}
+
 async fn quarantine_one(
     runtime: Runtime,
     target: &str,
-    user: &str,
+    codecs_dir: &str,
     src: &str,
     dest: &str,
 ) -> Result<()> {
-    let mut mv = guest_as(runtime, target, user);
-    mv.arg("mv").arg("-n").arg("--").arg(src).arg(dest);
-    capture(mv).await?;
-    let mut verify = guest_as(runtime, target, user);
-    verify
-        .arg("sh")
+    let mut mv = guest_as(runtime, target, "root");
+    mv.arg("sh")
         .arg("-c")
-        .arg(r#"[ ! -e "$1" ] && [ ! -L "$1" ] && { [ -e "$2" ] || [ -L "$2" ]; }"#)
-        .arg("verify")
+        .arg(QUARANTINE_SH)
+        .arg("quarantine")
         .arg(src)
-        .arg(dest);
-    capture(verify).await.context("move not verified")?;
-    let mut chmod = guest_as(runtime, target, user);
-    chmod.arg("chmod").arg("000").arg("--").arg(dest);
-    capture(chmod).await?;
+        .arg(dest)
+        .arg(codecs_dir);
+    capture(mv).await.context("quarantine move")?;
     Ok(())
+}
+
+pub fn remaining_suspects(
+    codecs_dir: &str,
+    entries: &[CodecEntry],
+    prefs: &[(String, String)],
+) -> Vec<String> {
+    classify_codecs(codecs_dir, entries, prefs)
+        .into_iter()
+        .filter(|s| s.quarantinable)
+        .map(|s| s.path)
+        .collect()
 }
 
 /// **Harden a Plex server** against the companion-proxy SSRF / transcoder
 /// `dump-yuv` RCE chain. DESTRUCTIVE: clears malicious Transcoder prefs,
-/// moves suspect Codecs files into a quarantine dir (chmod 000, never
-/// deleted), and can disable remote publishing, kill transcoders and restart
+/// moves suspect Codecs files into a root-owned 0700 quarantine dir (regular
+/// files chmod 000, symlinks moved as links, never deleted), and can disable remote publishing, kill transcoders and restart
 /// Plex. `dryRun` reports the plan without changing anything.
 #[orca_tool(
     domain = "plex",
@@ -968,52 +1119,52 @@ async fn plex_security_harden(
     }
 
     let mut quarantine = Vec::new();
+    let mut remaining = Vec::new();
     let mut transcoders_killed = false;
     let mut restarted = false;
+    let mut user = None;
     if let Some(t) = args.target.as_deref() {
-        let codecs_dir = format!("{}/Codecs", args.data_dir);
-        let user = match args.run_as.clone() {
-            Some(u) => Some(u),
-            None => match data_dir_owner(args.runtime, t, &args.data_dir).await {
-                Ok(u) => Some(u),
-                Err(e) => {
-                    errors.push(format!("resolve run_as: {e:#}"));
-                    None
-                }
+        let data_dir = args.data_dir.trim_end_matches('/');
+        let codecs_dir = format!("{data_dir}/Codecs");
+        match check_data_dir(args.runtime, t, data_dir).await {
+            Err(e) => errors.push(format!("data_dir check: {e:#}")),
+            Ok(out) => match args.run_as.clone() {
+                Some(u) => user = Some(u),
+                None => match parse_owner(&out) {
+                    Ok(u) => user = Some(u),
+                    Err(e) => errors.push(format!("resolve run_as: {e:#}")),
+                },
             },
-        };
+        }
         match (
-            list_codec_entries(args.runtime, t, &args.data_dir).await,
+            list_codec_entries(args.runtime, t, data_dir).await,
             user.as_deref(),
         ) {
             (Err(e), _) => errors.push(format!("{e:#}")),
             (Ok(_), None) => errors.push("quarantine skipped: no run_as user".to_string()),
-            (Ok(entries), Some(user)) => {
-                let qdir = format!("{}/Codecs.quarantine", args.data_dir);
-                let stamp = plugin_toolkit::time::Timestamp::now().compact();
+            (Ok(entries), Some(_)) => {
+                let qdir = quarantine_dir(&plugin_toolkit::time::Timestamp::now().compact());
                 let suspects: Vec<CodecSuspect> = classify_codecs(&codecs_dir, &entries, &prefs)
                     .into_iter()
                     .filter(|s| s.quarantinable)
                     .collect();
                 let mut qdir_ready = dry_run;
                 if !dry_run && !suspects.is_empty() {
-                    let mut mk = guest_as(args.runtime, t, user);
-                    mk.arg("mkdir").arg("-p").arg("--").arg(&qdir);
-                    match capture(mk).await {
-                        Ok(_) => qdir_ready = true,
+                    match make_quarantine_dir(args.runtime, t, &qdir).await {
+                        Ok(()) => qdir_ready = true,
                         Err(e) => errors.push(format!("create quarantine dir: {e:#}")),
                     }
                 }
                 for s in suspects {
-                    let dest = quarantine_path(&qdir, &codecs_dir, &s.path, &stamp);
-                    let error = if !safe_codec_path(&args.data_dir, &s.path) {
+                    let dest = quarantine_path(&qdir, &codecs_dir, &s.path);
+                    let error = if !safe_codec_path(data_dir, &s.path) {
                         Some("refused: path outside Codecs or unsafe".to_string())
                     } else if !qdir_ready {
                         Some("quarantine dir unavailable".to_string())
                     } else if dry_run {
                         None
                     } else {
-                        quarantine_one(args.runtime, t, user, &s.path, &dest)
+                        quarantine_one(args.runtime, t, &codecs_dir, &s.path, &dest)
                             .await
                             .err()
                             .map(|e| format!("{e:#}"))
@@ -1026,19 +1177,31 @@ async fn plex_security_harden(
                         error,
                     });
                 }
+                if !dry_run && !quarantine.is_empty() {
+                    match list_codec_entries(args.runtime, t, data_dir).await {
+                        Ok(after) => remaining = remaining_suspects(&codecs_dir, &after, &prefs),
+                        Err(e) => errors.push(format!("re-check: {e:#}")),
+                    }
+                }
             }
         }
 
         if args.kill_transcoders && !dry_run {
-            let mut kill = guest(args.runtime, t);
-            kill.arg("pkill").arg("-x").arg("Plex Transcoder");
-            if let Some(u) = user.as_deref() {
-                kill.arg("-u").arg(u);
-            }
-            match output_of(kill).await {
-                Ok((Some(0 | 1), _)) => transcoders_killed = true,
-                Ok((code, _)) => errors.push(format!("pkill transcoders exited {code:?}")),
-                Err(e) => errors.push(format!("{e:#}")),
+            match user.as_deref() {
+                None => errors.push("pkill skipped: Plex user unresolved".to_string()),
+                Some(u) => {
+                    let mut kill = guest(args.runtime, t);
+                    kill.arg("pkill")
+                        .arg("-x")
+                        .arg("-u")
+                        .arg(u)
+                        .arg("Plex Transcoder");
+                    match output_of(kill).await {
+                        Ok((Some(0 | 1), _)) => transcoders_killed = true,
+                        Ok((code, _)) => errors.push(format!("pkill transcoders exited {code:?}")),
+                        Err(e) => errors.push(format!("{e:#}")),
+                    }
+                }
             }
         }
 
@@ -1063,6 +1226,13 @@ async fn plex_security_harden(
     }
     if !quarantine.is_empty() {
         follow_ups.push(QUARANTINE_NOTE.to_string());
+        follow_ups.push(RECHECK_NOTE.to_string());
+    }
+    if !remaining.is_empty() {
+        follow_ups.push(format!(
+            "{} Codecs suspects remain after quarantine; resolve them and re-check before killing transcoders or restarting",
+            remaining.len()
+        ));
     }
 
     Ok(PlexSecurityHardenOutput {
@@ -1071,6 +1241,8 @@ async fn plex_security_harden(
         remote_disabled,
         remote_disable_planned: args.disable_remote,
         quarantine,
+        run_as: user,
+        remaining_suspects: remaining,
         transcoders_killed,
         restarted,
         errors,
@@ -1259,6 +1431,10 @@ mod tests {
         assert!(value_is_suspicious("a.so.1"));
         assert!(!value_is_suspicious("https://example.social/x"));
         assert!(!value_is_suspicious("also"));
+        assert!(value_is_suspicious("x.so\"y"));
+        assert!(value_is_suspicious("x.so/y"));
+        assert!(value_is_suspicious("x.so2"));
+        assert!(!value_is_suspicious("x.sox"));
     }
 
     #[test]
@@ -1275,14 +1451,132 @@ mod tests {
     #[test]
     fn quarantine_path_keeps_origin_dir() {
         assert_eq!(
-            quarantine_path(
-                "/d/Codecs.quarantine",
-                "/d/Codecs",
-                "/d/Codecs/a/b/abc-linux-x86_64/zz7.so",
-                "20261024-000000"
-            ),
-            "/d/Codecs.quarantine/a__b__abc-linux-x86_64__zz7.so.20261024-000000.quarantined"
+            quarantine_path("/q/1", "/d/Codecs", "/d/Codecs/a/b/abc-linux-x86_64/zz7.so"),
+            format!(
+                "/q/1/a__b__abc-linux-x86_64__zz7.so.{}.quarantined",
+                short_hash("a/b/abc-linux-x86_64/zz7.so")
+            )
         );
+        assert_ne!(
+            quarantine_path("/q", "/d/Codecs", "/d/Codecs/a__b/x.so"),
+            quarantine_path("/q", "/d/Codecs", "/d/Codecs/a/b__x.so")
+        );
+        assert_eq!(quarantine_dir("s"), "/var/lib/orca-quarantine/plex/s");
+    }
+
+    #[test]
+    fn quarantine_script_never_chmods_symlinks() {
+        assert!(QUARANTINE_SH.contains(r#"if [ ! -L "$dest" ] && [ -f "$dest" ]"#));
+        assert!(QUARANTINE_SH.contains(r#"mv -n -T -- "./$base" "$dest""#));
+        assert!(QUARANTINE_SH.contains(r#"[ ! -L "$c" ]"#));
+        assert_eq!(QUARANTINE_SH.matches("chmod").count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symlink_suspect_moved_as_link_target_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let codecs = root.join("Codecs");
+        let q = root.join("q");
+        std::fs::create_dir_all(codecs.join("a")).unwrap();
+        std::fs::create_dir(&q).unwrap();
+        let victim = root.join("victim");
+        std::fs::write(&victim, "x").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = codecs.join("a/evil.so");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let dest = q.join("evil");
+        let st = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(QUARANTINE_SH)
+            .arg("t")
+            .arg(&link)
+            .arg(&dest)
+            .arg(&codecs)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert!(std::fs::symlink_metadata(&dest)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symlinked_parent_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let codecs = root.join("Codecs");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&codecs).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("f.so"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, codecs.join("a")).unwrap();
+        let st = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(QUARANTINE_SH)
+            .arg("t")
+            .arg(codecs.join("a/f.so"))
+            .arg(root.join("dest"))
+            .arg(&codecs)
+            .status()
+            .unwrap();
+        assert!(!st.success());
+        assert!(outside.join("f.so").exists());
+    }
+
+    #[test]
+    fn root_owned_data_dir_default_is_refused() {
+        assert!(parse_owner("0/root\n").is_err());
+        assert_eq!(parse_owner("998/plex\n").unwrap(), "plex");
+        assert!(parse_owner("998/UNKNOWN").is_err());
+        assert!(parse_owner("garbage").is_err());
+    }
+
+    #[test]
+    fn post_quarantine_rescan_reports_remaining() {
+        let prefs = kv(&[]);
+        let after = vec![
+            entry("abc-linux-x86_64/libh264_decoder.so", 1000.0, false),
+            entry("abc-linux-x86_64/x/payload.so", 1000.0, false),
+        ];
+        let left = remaining_suspects("/d/Codecs", &after, &prefs);
+        assert_eq!(
+            left,
+            vec!["/d/Codecs/abc-linux-x86_64/x/payload.so".to_string()]
+        );
+        let clean = vec![entry("abc-linux-x86_64/libh264_decoder.so", 1000.0, false)];
+        assert!(remaining_suspects("/d/Codecs", &clean, &prefs).is_empty());
+    }
+
+    #[test]
+    fn short_form_ipv4_and_localhost_names() {
+        for h in ["127.1", "0177.0.0.1", "0x7f.1", "127.0.0.1.", "2130706433"] {
+            assert!(parse_host_ip(h).unwrap().is_loopback(), "{h}");
+        }
+        assert!(parse_host_ip("256.1.1.1").is_none());
+        assert!(parse_host_ip("1.2.3.4.5").is_none());
+        assert!(is_localhost_name("foo.localhost"));
+        assert!(is_localhost_name("localhost."));
+        assert!(!is_localhost_name("notlocalhost"));
+        assert!(is_non_wan_ip("0.0.0.0"));
+        assert!(is_non_wan_ip("::"));
+        for host in ["127.1", "0x7f.1", "foo.localhost", "%25%33%31%32%37.0.0.1"] {
+            let line = format!(
+                "t [1] DEBUG - Request: [10.0.0.5:1 (Subnet)] GET /player/timeline/subscribe?protocol=http%3A%2F%2F{host}:32400/x"
+            );
+            assert_eq!(
+                parse_ioc_line(&line).unwrap().severity,
+                Severity::Critical,
+                "{host}"
+            );
+        }
     }
 
     #[test]
