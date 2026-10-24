@@ -270,13 +270,16 @@ fn lines(out: &str) -> Vec<String> {
     seen
 }
 
-/// Build a `NOT LIKE` guard excluding rows under any authoritative root.
+/// Build a literal-prefix guard excluding rows under any authoritative root.
 /// `col` is the column; `prefix` is prepended to each root (empty for
 /// `media_parts.file`, `file://` for the scheme-carrying `media_streams.url`).
 pub(crate) fn not_under_clause(col: &str, roots: &[String], prefix: &str) -> String {
     roots
         .iter()
-        .map(|r| format!("{col} NOT LIKE '{prefix}{}/%'", sql_escape(r)))
+        .map(|r| {
+            let p = format!("{prefix}{}/", sql_escape(r));
+            format!("substr({col},1,length('{p}')) <> '{p}'")
+        })
         .collect::<Vec<_>>()
         .join(" AND ")
 }
@@ -463,11 +466,20 @@ async fn plex_storage_repair(
 /// (which never shares `from_root`'s leading string) can't be re-matched.
 pub(crate) fn repair_sql(rw: &DriftRewrite) -> String {
     let (from, to) = (sql_escape(&rw.from_root), sql_escape(&rw.to_root));
-    format!(
-        "UPDATE media_parts SET file=replace(file,'{from}/','{to}/') WHERE file LIKE '{from}/%';\n\
-         UPDATE media_streams SET url=replace(url,'file://{from}/','file://{to}/') WHERE url LIKE 'file://{from}/%';\n\
-         UPDATE section_locations SET root_path=replace(root_path,'{from}/','{to}/') WHERE root_path LIKE '{from}/%';"
-    )
+    [
+        ("media_parts", "file", ""),
+        ("media_streams", "url", "file://"),
+        ("section_locations", "root_path", ""),
+    ]
+    .iter()
+    .map(|(table, col, scheme)| {
+        let (f, t) = (format!("{scheme}{from}/"), format!("{scheme}{to}/"));
+        format!(
+            "UPDATE {table} SET {col} = '{t}' || substr({col}, length('{f}')+1) WHERE substr({col},1,length('{f}')) = '{f}';"
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 #[cfg(test)]
@@ -587,12 +599,15 @@ mod tests {
             occurrences: 1,
         };
         let sql = repair_sql(&rw);
-        assert!(
-            sql.contains("UPDATE media_parts SET file=replace(file,'/data/','/mnt/data/media/')")
-        );
-        assert!(sql.contains("url=replace(url,'file:///data/','file:///mnt/data/media/')"));
-        assert!(sql.contains("UPDATE section_locations"));
-        assert!(sql.contains("WHERE file LIKE '/data/%'"));
+        assert!(sql.contains(
+            "UPDATE media_parts SET file = '/mnt/data/media/' || substr(file, length('/data/')+1) WHERE substr(file,1,length('/data/')) = '/data/';"
+        ));
+        assert!(sql.contains(
+            "UPDATE media_streams SET url = 'file:///mnt/data/media/' || substr(url, length('file:///data/')+1) WHERE substr(url,1,length('file:///data/')) = 'file:///data/';"
+        ));
+        assert!(sql.contains("UPDATE section_locations SET root_path"));
+        assert!(!sql.contains("LIKE"));
+        assert!(!sql.contains("replace("));
     }
 
     #[test]
