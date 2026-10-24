@@ -2,5 +2,3 @@
 **/*.rs.bk
 Cargo.lock.orig
 
-# local-dev orca override (never commit)
-/.cargo/config.toml
