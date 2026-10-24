@@ -27,12 +27,11 @@
 
 use plugin_toolkit::prelude::*;
 
-use crate::guest_exec::{exec, Guest, GuestOp, ServiceAction};
+use crate::guest_exec::{exec, Guest, GuestOp, PlexDb, ServiceAction, SqlQuery};
 use crate::lifecycle::Runtime;
 
-/// Default library DB inside a stock Plex container.
-const DEFAULT_DB: &str =
-    "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db";
+const DEFAULT_DATA_DIR: &str =
+    "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pure classifier
@@ -247,12 +246,13 @@ pub(crate) async fn service(guest: &Guest, action: ServiceAction) -> Result<()> 
     Ok(())
 }
 
-async fn plex_sql(guest: &Guest, db: &str, sql: &str) -> Result<String> {
+async fn plex_sql(guest: &Guest, data_dir: &str, query: SqlQuery) -> Result<String> {
     exec(
         guest,
         GuestOp::Sql {
-            db: db.to_string(),
-            sql: sql.to_string(),
+            data_dir: data_dir.to_string(),
+            db: PlexDb::Library,
+            query,
         },
     )
     .await?
@@ -273,7 +273,7 @@ fn lines(out: &str) -> Vec<String> {
 /// Build a `NOT LIKE` guard excluding rows under any authoritative root.
 /// `col` is the column; `prefix` is prepended to each root (empty for
 /// `media_parts.file`, `file://` for the scheme-carrying `media_streams.url`).
-fn not_under_clause(col: &str, roots: &[String], prefix: &str) -> String {
+pub(crate) fn not_under_clause(col: &str, roots: &[String], prefix: &str) -> String {
     roots
         .iter()
         .map(|r| format!("{col} NOT LIKE '{prefix}{}/%'", sql_escape(r)))
@@ -288,37 +288,37 @@ fn sql_escape(s: &str) -> String {
 
 /// Gather the live mounts + authoritative roots + a bounded sample of
 /// offending paths, then classify.
-async fn check(runtime: Runtime, id: &str, db: &str) -> Result<StorageReport> {
+async fn check(runtime: Runtime, id: &str, data_dir: &str) -> Result<StorageReport> {
     let guest = Guest::parse(runtime, id)?;
     let mount_targets = match exec(&guest, GuestOp::StorageProbe).await {
         Ok(out) => lines(&out.checked("findmnt").unwrap_or_default()),
         Err(_) => Vec::new(),
     };
 
-    // Authoritative library roots.
-    let roots = lines(
-        &plex_sql(
-            &guest,
-            db,
-            "SELECT root_path FROM section_locations WHERE root_path LIKE '/%';",
-        )
-        .await?,
-    );
+    let roots = lines(&plex_sql(&guest, data_dir, SqlQuery::LibraryRoots).await?);
 
-    // Sample offending rows from both path-bearing columns.
     let mut offending = Vec::new();
     if !roots.is_empty() {
-        let parts_sql = format!(
-            "SELECT DISTINCT file FROM media_parts WHERE file LIKE '/%' AND {} LIMIT 100;",
-            not_under_clause("file", &roots, "")
-        );
-        offending.extend(lines(&plex_sql(&guest, db, &parts_sql).await?));
-
-        let streams_sql = format!(
-            "SELECT DISTINCT url FROM media_streams WHERE url LIKE 'file:///%' AND {} LIMIT 100;",
-            not_under_clause("url", &roots, "file://")
-        );
-        offending.extend(lines(&plex_sql(&guest, db, &streams_sql).await?));
+        offending.extend(lines(
+            &plex_sql(
+                &guest,
+                data_dir,
+                SqlQuery::OffendingParts {
+                    roots: roots.clone(),
+                },
+            )
+            .await?,
+        ));
+        offending.extend(lines(
+            &plex_sql(
+                &guest,
+                data_dir,
+                SqlQuery::OffendingStreams {
+                    roots: roots.clone(),
+                },
+            )
+            .await?,
+        ));
     }
 
     Ok(classify(roots, mount_targets, &offending))
@@ -338,14 +338,14 @@ pub struct PlexStorageCheckArgs {
     /// LXC vmid or docker container name/id.
     #[arg(long)]
     pub target: String,
-    /// Override the in-container library DB path.
-    #[arg(long, default_value_t = default_db())]
-    #[serde(default = "default_db")]
-    pub db_path: String,
+    /// Absolute Plex data directory inside the guest; the library DB is fixed beneath it.
+    #[arg(long, default_value_t = default_data_dir())]
+    #[serde(default = "default_data_dir")]
+    pub data_dir: String,
 }
 
-fn default_db() -> String {
-    DEFAULT_DB.to_string()
+fn default_data_dir() -> String {
+    DEFAULT_DATA_DIR.to_string()
 }
 
 /// **Detect media-storage problems** on a Plex instance: a library root not
@@ -353,7 +353,7 @@ fn default_db() -> String {
 /// retired root. Read-only; each issue carries the rewrite that would fix it.
 #[orca_tool(domain = "plex", verb = "storage_check")]
 async fn plex_storage_check(args: PlexStorageCheckArgs, _ctx: &ToolCtx) -> Result<StorageReport> {
-    check(args.runtime, &args.target, &args.db_path).await
+    check(args.runtime, &args.target, &args.data_dir).await
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -370,10 +370,10 @@ pub struct PlexStorageRepairArgs {
     /// LXC vmid or docker container name/id.
     #[arg(long)]
     pub target: String,
-    /// Override the in-container library DB path.
-    #[arg(long, default_value_t = default_db())]
-    #[serde(default = "default_db")]
-    pub db_path: String,
+    /// Absolute Plex data directory inside the guest; the library DB is fixed beneath it.
+    #[arg(long, default_value_t = default_data_dir())]
+    #[serde(default = "default_data_dir")]
+    pub data_dir: String,
     /// Apply the fixes. Without this the tool only reports the plan (dry-run).
     #[arg(long)]
     #[serde(default)]
@@ -403,7 +403,7 @@ async fn plex_storage_repair(
     args: PlexStorageRepairArgs,
     _ctx: &ToolCtx,
 ) -> Result<PlexStorageRepairOutput> {
-    let report = check(args.runtime, &args.target, &args.db_path).await?;
+    let report = check(args.runtime, &args.target, &args.data_dir).await?;
     let rewrites: Vec<DriftRewrite> = report
         .issues
         .into_iter()
@@ -419,30 +419,33 @@ async fn plex_storage_repair(
     }
 
     let guest = Guest::parse(args.runtime, &args.target)?;
-    let db = args.db_path.as_str();
+    let data_dir = args.data_dir.as_str();
 
-    // Stop Plex so the DB is quiescent before we rewrite it.
     service(&guest, ServiceAction::Stop).await?;
 
-    // Back the DB up next to itself.
-    let stamp = now_stamp();
-    let backup = format!("{db}.orca-bak-{stamp}");
-    exec(
+    let backup = exec(
         &guest,
         GuestOp::DbBackup {
-            db: db.to_string(),
-            stamp,
+            data_dir: data_dir.to_string(),
+            db: PlexDb::Library,
         },
     )
     .await?
-    .checked("back up library DB")?;
+    .checked("back up library DB")?
+    .trim()
+    .to_string();
 
-    // Apply each rewrite, anchored so a row is only touched once.
     for rw in &rewrites {
-        let sql = repair_sql(rw);
-        plex_sql(&guest, db, &sql)
-            .await
-            .with_context(|| format!("apply rewrite {} -> {}", rw.from_root, rw.to_root))?;
+        plex_sql(
+            &guest,
+            data_dir,
+            SqlQuery::RewriteRoot {
+                from_root: rw.from_root.clone(),
+                to_root: rw.to_root.clone(),
+            },
+        )
+        .await
+        .with_context(|| format!("apply rewrite {} -> {}", rw.from_root, rw.to_root))?;
     }
 
     // Restart.
@@ -458,19 +461,13 @@ async fn plex_storage_repair(
 /// The `UPDATE ... replace()` batch for one rewrite, across all three
 /// path-bearing columns. Rows are guarded by a leading `LIKE` so `to_root`
 /// (which never shares `from_root`'s leading string) can't be re-matched.
-fn repair_sql(rw: &DriftRewrite) -> String {
+pub(crate) fn repair_sql(rw: &DriftRewrite) -> String {
     let (from, to) = (sql_escape(&rw.from_root), sql_escape(&rw.to_root));
     format!(
         "UPDATE media_parts SET file=replace(file,'{from}/','{to}/') WHERE file LIKE '{from}/%';\n\
          UPDATE media_streams SET url=replace(url,'file://{from}/','file://{to}/') WHERE url LIKE 'file://{from}/%';\n\
          UPDATE section_locations SET root_path=replace(root_path,'{from}/','{to}/') WHERE root_path LIKE '{from}/%';"
     )
-}
-
-/// UTC `YYYYMMDD-HHMMSS` stamp for backup names, via the orca core datetime
-/// seam — the plugin bundles no datetime library of its own.
-fn now_stamp() -> String {
-    plugin_toolkit::time::Timestamp::now().compact()
 }
 
 #[cfg(test)]
