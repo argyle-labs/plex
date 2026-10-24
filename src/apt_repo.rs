@@ -29,6 +29,21 @@ pub struct PlexAptRepoRepairOutput {
     pub actions: Vec<String>,
 }
 
+fn valid_target(runtime: Runtime, target: &str) -> bool {
+    match runtime {
+        Runtime::Lxc => !target.is_empty() && target.bytes().all(|b| b.is_ascii_digit()),
+        Runtime::Docker => {
+            target
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+                && target
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        }
+    }
+}
+
 fn repair_command(runtime: Runtime, target: &str, dry_run: bool) -> Command {
     let mut cmd = guest(runtime, target);
     cmd.arg("env")
@@ -67,6 +82,9 @@ async fn plex_apt_repo_repair(
     args: PlexAptRepoRepairArgs,
     ctx: &ToolCtx,
 ) -> Result<PlexAptRepoRepairOutput> {
+    if !valid_target(args.runtime, &args.target) {
+        bail!("invalid target {:?}", args.target);
+    }
     let dry_run = ctx.dry_run();
     let stdout = capture(repair_command(args.runtime, &args.target, dry_run))
         .await
@@ -84,6 +102,26 @@ mod tests {
             .chain(std.get_args())
             .map(|s| s.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn targets_reject_option_injection() {
+        assert!(valid_target(Runtime::Lxc, "105"));
+        assert!(!valid_target(Runtime::Lxc, "-1"));
+        assert!(!valid_target(Runtime::Lxc, ""));
+        assert!(valid_target(Runtime::Docker, "plex_1.a-b"));
+        assert!(!valid_target(Runtime::Docker, "--privileged"));
+        assert!(!valid_target(Runtime::Docker, "plex;rm"));
+    }
+
+    #[test]
+    fn script_installs_new_source_before_removing_legacy() {
+        let write = SCRIPT.find("act \"write $LIST\"").unwrap();
+        let remove = SCRIPT.find("act \"remove $f\"").unwrap();
+        let install = SCRIPT.find("act \"install $KEYRING\"").unwrap();
+        assert!(install < write && write < remove);
+        assert!(SCRIPT.contains("mv -f \"$dearmored\" \"$KEYRING\""));
+        assert!(SCRIPT.contains("mv -f \"$tmp\" \"$LIST\""));
     }
 
     #[test]
