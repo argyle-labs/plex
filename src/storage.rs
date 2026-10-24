@@ -26,17 +26,13 @@
 #![allow(clippy::disallowed_types)]
 
 use plugin_toolkit::prelude::*;
-use tokio::process::Command;
 
+use crate::guest_exec::{exec, Guest, GuestOp, ServiceAction};
 use crate::lifecycle::Runtime;
 
 /// Default library DB inside a stock Plex container.
 const DEFAULT_DB: &str =
     "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db";
-/// The `sqlite3`-compatible binary Plex ships; avoids needing sqlite installed.
-const PLEX_SQLITE: &str = "/usr/lib/plexmediaserver/Plex SQLite";
-/// Systemd unit name inside the container.
-const PLEX_UNIT: &str = "plexmediaserver";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pure classifier
@@ -244,71 +240,23 @@ pub fn classify(
 // Exec layer
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Base `pct exec <id> --` / `docker exec <id>` command the guest steps append
-/// their argv to. No shell: args are passed literally, so paths with spaces
-/// (the `Plex SQLite` binary, the DB) need no quoting.
-pub(crate) fn guest(runtime: Runtime, id: &str) -> Command {
-    let mut cmd = match runtime {
-        Runtime::Lxc => {
-            let mut c = Command::new("pct");
-            c.arg("exec").arg(id).arg("--");
-            c
-        }
-        Runtime::Docker => {
-            let mut c = Command::new("docker");
-            c.arg("exec").arg(id);
-            c
-        }
-    };
-    cmd.kill_on_drop(true);
-    cmd
+pub(crate) async fn service(guest: &Guest, action: ServiceAction) -> Result<()> {
+    exec(guest, GuestOp::Service { action })
+        .await?
+        .checked("systemctl plexmediaserver")?;
+    Ok(())
 }
 
-pub(crate) fn guest_as(runtime: Runtime, id: &str, user: &str) -> Command {
-    let mut cmd = match runtime {
-        Runtime::Lxc => {
-            let mut c = Command::new("pct");
-            c.arg("exec")
-                .arg(id)
-                .arg("--")
-                .arg("runuser")
-                .arg("-u")
-                .arg(user)
-                .arg("--");
-            c
-        }
-        Runtime::Docker => {
-            let mut c = Command::new("docker");
-            c.arg("exec").arg("-u").arg(user).arg(id);
-            c
-        }
-    };
-    cmd.kill_on_drop(true);
-    cmd
-}
-
-/// Run a guest command, returning stdout; a non-zero exit carries stderr.
-pub(crate) async fn capture(mut cmd: Command) -> Result<String> {
-    let out = cmd
-        .output()
-        .await
-        .context("failed to spawn guest command")?;
-    if !out.status.success() {
-        bail!(
-            "guest command failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// Run one SQL statement through the container's `Plex SQLite`, newline-joining
-/// result columns with `|` (sqlite default). `db` is passed as a literal arg.
-async fn plex_sql(runtime: Runtime, id: &str, db: &str, sql: &str) -> Result<String> {
-    let mut cmd = guest(runtime, id);
-    cmd.arg(PLEX_SQLITE).arg(db).arg(sql);
-    capture(cmd).await
+async fn plex_sql(guest: &Guest, db: &str, sql: &str) -> Result<String> {
+    exec(
+        guest,
+        GuestOp::Sql {
+            db: db.to_string(),
+            sql: sql.to_string(),
+        },
+    )
+    .await?
+    .checked("Plex SQLite")
 }
 
 /// Non-empty, de-duplicated lines from a guest command's stdout.
@@ -341,16 +289,16 @@ fn sql_escape(s: &str) -> String {
 /// Gather the live mounts + authoritative roots + a bounded sample of
 /// offending paths, then classify.
 async fn check(runtime: Runtime, id: &str, db: &str) -> Result<StorageReport> {
-    // Live mount targets inside the guest.
-    let mut mount_cmd = guest(runtime, id);
-    mount_cmd.arg("findmnt").arg("-rno").arg("TARGET");
-    let mount_targets = lines(&capture(mount_cmd).await.unwrap_or_default());
+    let guest = Guest::parse(runtime, id)?;
+    let mount_targets = match exec(&guest, GuestOp::StorageProbe).await {
+        Ok(out) => lines(&out.checked("findmnt").unwrap_or_default()),
+        Err(_) => Vec::new(),
+    };
 
     // Authoritative library roots.
     let roots = lines(
         &plex_sql(
-            runtime,
-            id,
+            &guest,
             db,
             "SELECT root_path FROM section_locations WHERE root_path LIKE '/%';",
         )
@@ -364,13 +312,13 @@ async fn check(runtime: Runtime, id: &str, db: &str) -> Result<StorageReport> {
             "SELECT DISTINCT file FROM media_parts WHERE file LIKE '/%' AND {} LIMIT 100;",
             not_under_clause("file", &roots, "")
         );
-        offending.extend(lines(&plex_sql(runtime, id, db, &parts_sql).await?));
+        offending.extend(lines(&plex_sql(&guest, db, &parts_sql).await?));
 
         let streams_sql = format!(
             "SELECT DISTINCT url FROM media_streams WHERE url LIKE 'file:///%' AND {} LIMIT 100;",
             not_under_clause("url", &roots, "file://")
         );
-        offending.extend(lines(&plex_sql(runtime, id, db, &streams_sql).await?));
+        offending.extend(lines(&plex_sql(&guest, db, &streams_sql).await?));
     }
 
     Ok(classify(roots, mount_targets, &offending))
@@ -470,31 +418,35 @@ async fn plex_storage_repair(
         });
     }
 
-    let (rt, id, db) = (args.runtime, args.target.as_str(), args.db_path.as_str());
+    let guest = Guest::parse(args.runtime, &args.target)?;
+    let db = args.db_path.as_str();
 
     // Stop Plex so the DB is quiescent before we rewrite it.
-    let mut stop = guest(rt, id);
-    stop.arg("systemctl").arg("stop").arg(PLEX_UNIT);
-    capture(stop).await.context("stop plexmediaserver")?;
+    service(&guest, ServiceAction::Stop).await?;
 
     // Back the DB up next to itself.
-    let backup = format!("{db}.orca-bak-{}", now_stamp());
-    let mut cp = guest(rt, id);
-    cp.arg("cp").arg("-a").arg(db).arg(&backup);
-    capture(cp).await.context("back up library DB")?;
+    let stamp = now_stamp();
+    let backup = format!("{db}.orca-bak-{stamp}");
+    exec(
+        &guest,
+        GuestOp::DbBackup {
+            db: db.to_string(),
+            stamp,
+        },
+    )
+    .await?
+    .checked("back up library DB")?;
 
     // Apply each rewrite, anchored so a row is only touched once.
     for rw in &rewrites {
         let sql = repair_sql(rw);
-        plex_sql(rt, id, db, &sql)
+        plex_sql(&guest, db, &sql)
             .await
             .with_context(|| format!("apply rewrite {} -> {}", rw.from_root, rw.to_root))?;
     }
 
     // Restart.
-    let mut start = guest(rt, id);
-    start.arg("systemctl").arg("start").arg(PLEX_UNIT);
-    capture(start).await.context("start plexmediaserver")?;
+    service(&guest, ServiceAction::Start).await?;
 
     Ok(PlexStorageRepairOutput {
         applied: true,
