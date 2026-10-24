@@ -379,13 +379,20 @@ fn valid_roots(roots: &[String]) -> bool {
     !roots.is_empty() && roots.len() <= MAX_ROOTS && roots.iter().all(|r| valid_root(r))
 }
 
+pub fn doubled_segment(from_root: &str, to_root: &str) -> bool {
+    let (f, t) = (segments(from_root), segments(to_root));
+    f.len() == t.len() + 1 && f[..t.len()] == t[..] && t.last() == f.last()
+}
+
 pub fn check_rewrite(
     from_root: &str,
     to_root: &str,
     library_roots: &[String],
     mounts: &[String],
 ) -> Result<()> {
-    if under(from_root, to_root) || under(to_root, from_root) {
+    if (under(from_root, to_root) || under(to_root, from_root))
+        && !doubled_segment(from_root, to_root)
+    {
         bail!("from_root {from_root:?} and to_root {to_root:?} overlap");
     }
     if library_roots
@@ -1157,6 +1164,25 @@ mod tests {
         .is_err());
         assert!(check_rewrite("/mnt", "/mnt/data/media", &roots, &mounts).is_err());
         assert!(check_rewrite("/mnt/data/media/old", "/mnt/data/media", &roots, &mounts).is_err());
+        assert!(check_rewrite("/mnt/data/media/media", "/mnt/data/media", &roots, &mounts).is_ok());
+        assert!(check_rewrite(
+            "/mnt/data/media/media/media",
+            "/mnt/data/media",
+            &roots,
+            &mounts
+        )
+        .is_err());
+        assert!(
+            check_rewrite("/mnt/data/media", "/mnt/data/media/media", &roots, &mounts).is_err()
+        );
+        let media_root = vec!["/mnt/data/media/media/x".to_string()];
+        assert!(check_rewrite(
+            "/mnt/data/media/media",
+            "/mnt/data/media",
+            &media_root,
+            &mounts
+        )
+        .is_err());
         let count = SqlQuery::CountParts {
             root: "/data".into(),
         }
