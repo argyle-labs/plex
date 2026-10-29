@@ -21,6 +21,7 @@
 #![allow(clippy::disallowed_types)]
 
 use plugin_toolkit::prelude::*;
+use plugin_toolkit::secrets;
 
 use crate::account::{self, PresenceStatus, ServerPresence};
 use crate::diag::SessionTranscodeHealth;
@@ -46,10 +47,8 @@ pub struct PlexEndpoint {
 pub(crate) fn make_client(name: &str) -> Result<Client> {
     let row = endpoint_db::get(name)?
         .with_context(|| format!("plex endpoint '{name}' not registered"))?;
-    if !row.enabled {
-        bail!("plex endpoint '{name}' is disabled");
-    }
-    Ok(Client::new(Config::new(row.base_url, row.token)))
+    let token = endpoint_token(name)?;
+    Ok(Client::new(Config::new(row.base_url, token)))
 }
 
 /// Resolve just the token for a registered endpoint. Used by the plex.tv
@@ -57,13 +56,21 @@ pub(crate) fn make_client(name: &str) -> Result<Client> {
 /// treats the endpoint's token as the account token. The secret never leaves
 /// this boundary — it is passed straight into the account probe and never
 /// logged or returned.
+///
+/// `endpoint_db::get` deliberately never populates `#[secret]` fields (so
+/// `plex.list`/`plex.detail` can't leak a token) — the real value has to be
+/// read straight from the secrets store under the same `scoped_name` key
+/// `create`/`update` wrote it to.
 pub(crate) fn endpoint_token(name: &str) -> Result<String> {
     let row = endpoint_db::get(name)?
         .with_context(|| format!("plex endpoint '{name}' not registered"))?;
     if !row.enabled {
         bail!("plex endpoint '{name}' is disabled");
     }
-    Ok(row.token)
+    let key = secrets::scoped_name("plex", name, "token")?;
+    secrets::get(key.as_str())?
+        .map(|s| s.expose_secret().clone())
+        .with_context(|| format!("plex endpoint '{name}' has no stored token"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
