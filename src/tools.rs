@@ -67,10 +67,9 @@ pub(crate) fn endpoint_token(name: &str) -> Result<String> {
     if !row.enabled {
         bail!("plex endpoint '{name}' is disabled");
     }
-    let key = secrets::scoped_name("plex", name, "token")?;
-    secrets::get(key.as_str())?
-        .map(|s| s.expose_secret().clone())
-        .with_context(|| format!("plex endpoint '{name}' has no stored token"))
+    Ok(secrets::resolve_scoped("plex", name, "token")?
+        .expose_secret()
+        .clone())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
