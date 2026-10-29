@@ -56,11 +56,6 @@ pub(crate) fn make_client(name: &str) -> Result<Client> {
 /// treats the endpoint's token as the account token. The secret never leaves
 /// this boundary — it is passed straight into the account probe and never
 /// logged or returned.
-///
-/// `endpoint_db::get` deliberately never populates `#[secret]` fields (so
-/// `plex.list`/`plex.detail` can't leak a token) — the real value has to be
-/// read straight from the secrets store under the same `scoped_name` key
-/// `create`/`update` wrote it to.
 pub(crate) fn endpoint_token(name: &str) -> Result<String> {
     let row = endpoint_db::get(name)?
         .with_context(|| format!("plex endpoint '{name}' not registered"))?;
