@@ -21,6 +21,7 @@
 #![allow(clippy::disallowed_types)]
 
 use plugin_toolkit::prelude::*;
+use plugin_toolkit::secrets;
 
 use crate::account::{self, PresenceStatus, ServerPresence};
 use crate::diag::SessionTranscodeHealth;
@@ -46,10 +47,8 @@ pub struct PlexEndpoint {
 pub(crate) fn make_client(name: &str) -> Result<Client> {
     let row = endpoint_db::get(name)?
         .with_context(|| format!("plex endpoint '{name}' not registered"))?;
-    if !row.enabled {
-        bail!("plex endpoint '{name}' is disabled");
-    }
-    Ok(Client::new(Config::new(row.base_url, row.token)))
+    let token = endpoint_token(name)?;
+    Ok(Client::new(Config::new(row.base_url, token)))
 }
 
 /// Resolve just the token for a registered endpoint. Used by the plex.tv
@@ -63,7 +62,9 @@ pub(crate) fn endpoint_token(name: &str) -> Result<String> {
     if !row.enabled {
         bail!("plex endpoint '{name}' is disabled");
     }
-    Ok(row.token)
+    Ok(secrets::resolve_scoped("plex", name, "token")?
+        .expose_secret()
+        .clone())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
