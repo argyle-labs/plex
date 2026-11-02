@@ -354,7 +354,11 @@ fn default_data_dir() -> String {
 /// **Detect media-storage problems** on a Plex instance: a library root not
 /// backed by a live mount, and per-item / subtitle paths stranded under a
 /// retired root. Read-only; each issue carries the rewrite that would fix it.
-#[orca_tool(domain = "plex", verb = "storage_check")]
+#[orca_tool(
+    domain = "plex",
+    verb = "storage_check",
+    tool_calls = ["proxmox.guest.label.audit"]
+)]
 async fn plex_storage_check(args: PlexStorageCheckArgs, _ctx: &ToolCtx) -> Result<StorageReport> {
     check(args.runtime, &args.target, &args.data_dir).await
 }
@@ -401,7 +405,11 @@ pub struct PlexStorageRepairOutput {
 /// path-bearing columns (`media_parts.file`, `media_streams.url`,
 /// `section_locations.root_path`) for each drifted root, and restarts. Dry-run
 /// by default.
-#[orca_tool(domain = "plex", verb = "storage_repair")]
+#[orca_tool(
+    domain = "plex",
+    verb = "storage_repair",
+    tool_calls = ["proxmox.guest.label.audit"]
+)]
 async fn plex_storage_repair(
     args: PlexStorageRepairArgs,
     _ctx: &ToolCtx,
@@ -485,6 +493,13 @@ pub(crate) fn repair_sql(rw: &DriftRewrite) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lxc_guest_op_callers_declare_the_proxmox_label_audit_tool_call() {
+        use plugin_toolkit::contract::OrcaToolDef;
+        assert_eq!(PlexStorageCheck::TOOL_CALLS, ["proxmox.guest.label.audit"]);
+        assert_eq!(PlexStorageRepair::TOOL_CALLS, ["proxmox.guest.label.audit"]);
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| (*x).to_string()).collect()
