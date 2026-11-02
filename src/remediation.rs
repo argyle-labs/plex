@@ -117,7 +117,11 @@ fn match_target<'a>(servers: &'a [ServerPresence], target: &str) -> Option<&'a S
 /// that re-announces presence), read the target's freshness, and — only if it
 /// is still `stale` — restart the service in its guest (tier-2). Returns what it
 /// found and what it did.
-#[orca_tool(domain = "plex", verb = "heal")]
+#[orca_tool(
+    domain = "plex",
+    verb = "heal",
+    tool_calls = ["proxmox.guest.label.audit"]
+)]
 async fn plex_heal(args: PlexHealArgs, _ctx: &ToolCtx) -> Result<PlexHealReport> {
     let threshold = args
         .threshold_secs
@@ -160,6 +164,12 @@ async fn plex_heal(args: PlexHealArgs, _ctx: &ToolCtx) -> Result<PlexHealReport>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lxc_guest_op_callers_declare_the_proxmox_label_audit_tool_call() {
+        use plugin_toolkit::contract::OrcaToolDef;
+        assert_eq!(PlexHeal::TOOL_CALLS, ["proxmox.guest.label.audit"]);
+    }
 
     fn presence(id: &str, status: PresenceStatus) -> ServerPresence {
         ServerPresence {

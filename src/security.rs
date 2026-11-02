@@ -962,7 +962,12 @@ async fn audit(args: &PlexSecurityAuditArgs) -> Result<PlexSecurityAuditReport> 
 /// indicators, and remote exposure. Read-only. A payload that reuses a shipped
 /// codec name is only caught when a pref references it; mtime outliers alone
 /// are warnings because Plex fetches codecs lazily.
-#[orca_tool(domain = "plex", verb = "security_audit", role = "admin")]
+#[orca_tool(
+    domain = "plex",
+    verb = "security_audit",
+    role = "admin",
+    tool_calls = ["proxmox.guest.label.audit"]
+)]
 async fn plex_security_audit(
     args: PlexSecurityAuditArgs,
     _ctx: &ToolCtx,
@@ -1087,7 +1092,8 @@ pub fn remaining_suspects(
     title = "Harden Plex (destructive)",
     role = "admin",
     execute_gated = false,
-    dry_run_aware = true
+    dry_run_aware = true,
+    tool_calls = ["proxmox.guest.label.audit"]
 )]
 async fn plex_security_harden(
     args: PlexSecurityHardenArgs,
@@ -1249,6 +1255,16 @@ async fn plex_security_harden(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lxc_guest_op_callers_declare_the_proxmox_label_audit_tool_call() {
+        use plugin_toolkit::contract::OrcaToolDef;
+        assert_eq!(PlexSecurityAudit::TOOL_CALLS, ["proxmox.guest.label.audit"]);
+        assert_eq!(
+            PlexSecurityHarden::TOOL_CALLS,
+            ["proxmox.guest.label.audit"]
+        );
+    }
 
     fn kv(v: &[(&str, &str)]) -> Vec<(String, String)> {
         v.iter()

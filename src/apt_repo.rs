@@ -71,7 +71,8 @@ fn parse_output(stdout: &str, dry_run: bool) -> PlexAptRepoRepairOutput {
     verb = "apt_repo_repair",
     role = "admin",
     execute_gated = false,
-    dry_run_aware = true
+    dry_run_aware = true,
+    tool_calls = ["proxmox.guest.label.audit"]
 )]
 async fn plex_apt_repo_repair(
     args: PlexAptRepoRepairArgs,
@@ -86,6 +87,12 @@ async fn plex_apt_repo_repair(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lxc_guest_op_callers_declare_the_proxmox_label_audit_tool_call() {
+        use plugin_toolkit::contract::OrcaToolDef;
+        assert_eq!(PlexAptRepoRepair::TOOL_CALLS, ["proxmox.guest.label.audit"]);
+    }
 
     #[test]
     fn targets_reject_option_injection() {

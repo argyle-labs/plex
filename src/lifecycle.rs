@@ -282,7 +282,11 @@ pub struct PlexUpdateOutput {
 /// re-pulls the channel image tag and recreates the container. On `lxc`, runs
 /// the apt source repair, the in-CT package upgrade, and reads back the
 /// installed version.
-#[orca_tool(domain = "plex", verb = "update")]
+#[orca_tool(
+    domain = "plex",
+    verb = "update",
+    tool_calls = ["proxmox.guest.label.audit"]
+)]
 async fn plex_update(args: PlexUpdateArgs, _ctx: &ToolCtx) -> Result<PlexUpdateOutput> {
     let tag = args.channel.image_tag();
     let output = match args.runtime {
@@ -375,7 +379,11 @@ pub struct PlexRestartOutput {
 /// `docker`, restarts the container. Forces a fresh plex.tv announce when the
 /// tier-1 nudge (`plex.discover`) is not enough. Runs host-local — no orca mesh
 /// dependency.
-#[orca_tool(domain = "plex", verb = "restart")]
+#[orca_tool(
+    domain = "plex",
+    verb = "restart",
+    tool_calls = ["proxmox.guest.label.audit"]
+)]
 async fn plex_restart(args: PlexRestartArgs, _ctx: &ToolCtx) -> Result<PlexRestartOutput> {
     restart_service(args).await
 }
@@ -554,6 +562,13 @@ fn now_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lxc_guest_op_callers_declare_the_proxmox_label_audit_tool_call() {
+        use plugin_toolkit::contract::OrcaToolDef;
+        assert_eq!(PlexUpdate::TOOL_CALLS, ["proxmox.guest.label.audit"]);
+        assert_eq!(PlexRestart::TOOL_CALLS, ["proxmox.guest.label.audit"]);
+    }
 
     #[test]
     fn channel_maps_to_image_tag() {
